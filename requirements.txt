@@ -1,0 +1,5 @@
+aiogram~=3.4.1
+pillow~=10.2.0
+numpy~=1.26.4
+opencv-python~=4.9.0.80
+rembg~=2.0.56
