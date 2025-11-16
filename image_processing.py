@@ -144,8 +144,8 @@ def print_remove_bg(image):
     img = rembg.remove(image)
     return img
 
-img = paste(None, (176, 37, 37), (0, 0), "cup", 0, 0)
-img.show()
+# img = paste(None, (176, 37, 37), (0, 0), "cup", 0, 0)
+# img.show()
 
 # mask = calculate_outline("cup_front")
 # mask.save(f"templates/masks/mask_cup_front.png", "PNG")

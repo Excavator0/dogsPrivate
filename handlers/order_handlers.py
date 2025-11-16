@@ -56,12 +56,17 @@ async def cmd_start(message: Message, state: FSMContext):
 
     chat_id = message.chat.id
     await message.answer(
-        text='<b>Привет!</b>\nДобро пожаловать в бота по заказу принтов!\n\n'
-             '<b>Выбери изделие, на которое хочешь нанести принт</b>',
-        reply_markup=make_type_keyboard(order_types).as_markup()
+        text=("Привет! Я — AIVADOG-бот! 🐾\n\n"
+              "Добро пожаловать в AIVADOG — место, где твой питомец становится частью твоего стиля 💛\n\n"
+              "Здесь ты можешь:\n\n"
+              "• выбрать изделие (футболку, худи, свитшот, штаны, брелок или шоппер),\n\n"
+              "• загрузить фото своей собачки 🐶,\n\n"
+              "• добавить фирменные принты и стикеры,\n\n"
+              "• увидеть готовый предпросмотр перед заказом!\n\n"
+              "С чего начнём?👇"),
+        reply_markup=make_main_menu_keyboard().as_markup()
     )
     await state.update_data({"chat_id": chat_id})
-    await state.set_state(Order.order_type)
 
 
 @router.message(CommandStart(deep_link=True))
@@ -80,6 +85,55 @@ async def start_with_link(message: Message, command: CommandObject, state: FSMCo
         await message.answer(text=f"Товар: {order_type}\nТеперь, выберите размер изделия",
                              reply_markup=make_sizes_keyboard(sizes[:-1]).as_markup())
     await state.set_state(Order.order_size)
+
+
+@router.callback_query(F.data == "choose_item")
+async def menu_choose_item(callback: CallbackQuery, state: FSMContext):
+    await callback.message.edit_text(
+        text='Выбери изделие, на которое хочешь нанести принт'
+    )
+    await callback.message.edit_reply_markup(
+        reply_markup=make_type_keyboard(order_types).as_markup()
+    )
+    await state.set_state(Order.order_type)
+
+
+@router.callback_query(F.data == "brand_info")
+async def show_brand_info(callback: CallbackQuery):
+    text = (
+        "AIVADOG – бренд, созданный из любви к питомцам.\n\n"
+        "Мы создаём одежду и аксессуары с уникальными принтами питомцев, чтобы ваш любимец всегда был рядом с вами, "
+        "ведь каждый день с питомцем – это радость, уют и маленькие моменты, которые делают жизнь ярче.\n"
+        "Мы верим, что любовь к нашим хвостикам можно носить с собой – на худи, футболке, на брелке или шоппере.\n"
+        "C любовью к деталям, этике и качеству – каждый дизайн проходит ручную доработку, печать делается с вниманием к материалам и цветам.\n"
+        "Наше стремление – не просто одежда, а выражение привязанности и радости каждый день/AivaDog – это не просто одежда. "
+        "Это способ показать, как сильно вы связаны со своим любимцем. ❤️"
+    )
+    await callback.message.edit_text(text=text)
+    await callback.message.edit_reply_markup(reply_markup=make_back_to_main_keyboard().as_markup())
+
+
+@router.callback_query(F.data == "show_examples")
+async def show_examples(callback: CallbackQuery):
+    await callback.message.edit_text(
+        text="Скоро добавим примеры дизайнов. А пока можете выбрать изделие 👇"
+    )
+    await callback.message.edit_reply_markup(reply_markup=make_back_to_main_keyboard().as_markup())
+
+
+@router.callback_query(F.data == "back_to_main")
+async def back_to_main(callback: CallbackQuery):
+    await callback.message.edit_text(
+        text=("Привет! Я — AIVADOG-бот! 🐾\n\n"
+              "Добро пожаловать в AIVADOG — место, где твой питомец становится частью твоего стиля 💛\n\n"
+              "Здесь ты можешь:\n\n"
+              "• выбрать изделие (футболку, худи, свитшот, штаны, брелок или шоппер),\n\n"
+              "• загрузить фото своей собачки 🐶,\n\n"
+              "• добавить фирменные принты и стикеры,\n\n"
+              "• увидеть готовый предпросмотр перед заказом!\n\n"
+              "С чего начнём?👇")
+    )
+    await callback.message.edit_reply_markup(reply_markup=make_main_menu_keyboard().as_markup())
 
 
 @router.callback_query(F.data.in_(set(order_types.values())))

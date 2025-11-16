@@ -50,3 +50,30 @@ def make_color_confirm_keyboard():
     ))
 
     return builder
+
+
+def make_main_menu_keyboard():
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(
+        text="🔘 Выбрать изделие",
+        callback_data="choose_item"
+    ))
+    builder.add(InlineKeyboardButton(
+        text="🔘 Посмотреть примеры дизайнов",
+        callback_data="show_examples"
+    ))
+    builder.add(InlineKeyboardButton(
+        text="🔘 Инфо о бренде",
+        callback_data="brand_info"
+    ))
+    builder.adjust(1)
+    return builder
+
+
+def make_back_to_main_keyboard():
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(
+        text="🔙 Назад к выбору",
+        callback_data="back_to_main"
+    ))
+    return builder
