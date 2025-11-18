@@ -1,4 +1,6 @@
 import json
+from pathlib import Path
+from typing import Optional
 
 from PIL import Image, ImageOps
 import cv2
@@ -40,19 +42,32 @@ lighter_shade_factor = 0.92
 #     numpy.savez('templates/shades.npz', shade_array)
 
 
+TEMPLATES_DIR = Path("templates")
+CLOTHES_DIR = TEMPLATES_DIR / "одежда_png"
+MASKS_DIR = TEMPLATES_DIR / "masks"
+
+
 def change_print_shade(image, item):
     img = image.convert("RGB")
-
     d = img.getdata()
-    new_image = []
     array = calculate_shades.arrs.get(item)
+    if array is None or len(array) != len(d):
+        return image
+
+    new_image = []
     for i in range(len(d)):
         if array[i] == 1:
-            new_image.append((int(d[i][0] * lighter_shade_factor), int(d[i][1] * lighter_shade_factor),
-                              int(d[i][2] * lighter_shade_factor)))
+            new_image.append(
+                (
+                    int(d[i][0] * lighter_shade_factor),
+                    int(d[i][1] * lighter_shade_factor),
+                    int(d[i][2] * lighter_shade_factor),
+                )
+            )
         elif array[i] == 2:
-            new_image.append((int(d[i][0] * shade_factor), int(d[i][1] * shade_factor),
-                              int(d[i][2] * shade_factor)))
+            new_image.append(
+                (int(d[i][0] * shade_factor), int(d[i][1] * shade_factor), int(d[i][2] * shade_factor))
+            )
         elif array[i] == 3:
             new_image.append((0, 0, 0))
         else:
@@ -86,41 +101,65 @@ def calculate_outline(item):
     return mask
 
 
-def paste(image, color, pos, item, side, angle, bg_deleted=False):
-    color = tuple(color)
+def _split_item_code(item_code: str) -> tuple[str, Optional[str]]:
+    parts = item_code.split("_", 1)
+    if len(parts) == 2:
+        return parts[0], parts[1]
+    return item_code, None
 
-    if side == 0:
-        item = item + "_front"
-    else:
-        item = item + "_back"
-    template = Image.open(f"templates/{item}.png").convert("RGBA")
-    mask = Image.open(f"templates/masks/mask_{item}.png")
-    rgba_color = color + (255,)
-    temporary_image = Image.new("RGBA", mask.size, rgba_color)
-    if 'A' in template.mode:
-        # Extract the alpha channel and invert it
-        alpha = template.getchannel('A')
-        alpha = ImageOps.invert(alpha)
-        # Paste white onto image wherever it is transparent
-        template.paste((255, 255, 255), mask=alpha)
-    # editing image
+
+def _resolve_template_path(item_code: str, side: int) -> Path:
+    base_item, variant = _split_item_code(item_code)
+    side_name = "front" if side == 0 else "back"
+    candidates = []
+    if variant:
+        candidates.append(CLOTHES_DIR / f"{base_item}_{side_name}_{variant}.png")
+        candidates.append(CLOTHES_DIR / f"{item_code}_{side_name}.png")
+    candidates.append(CLOTHES_DIR / f"{base_item}_{side_name}.png")
+    candidates.append(TEMPLATES_DIR / f"{base_item}_{side_name}.png")
+    for path in candidates:
+        if path.exists():
+            return path
+    raise FileNotFoundError(f"Не найден макет {item_code} ({side_name})")
+
+
+def paste(image, color, pos, item, side, angle, bg_deleted=False):
+    base_item, _ = _split_item_code(item)
+    template_path = _resolve_template_path(item, side)
+    template = Image.open(template_path).convert("RGBA")
+
+    mask_path = MASKS_DIR / f"mask_{base_item}_{'front' if side == 0 else 'back'}.png"
+    mask = Image.open(mask_path).convert("L") if mask_path.exists() else None
+
+    color_layer = None
+    if color is not None and mask is not None:
+        rgba_color = tuple(color) + (255,)
+        color_layer = Image.new("RGBA", template.size, rgba_color)
+
+    work_layer = Image.new("RGBA", template.size, (0, 0, 0, 0))
     if image is not None:
         if angle != 0:
             image = image.rotate(angle, expand=True)
         image = image.convert("RGBA")
-
-        # pasting onto template
         if pos != "deleted":
-            pos = tuple(pos)
-            temporary_image.paste(image, pos, image)
+            work_layer.paste(image, tuple(pos), image)
 
-    template.paste(temporary_image, (0, 0), mask)
-    if item == "bag_front" or item == "bag_back" or item == "cap_back":
-        mask = Image.open(f"templates/masks/{item}_hole.png").convert("L")
-        only_color = Image.new("RGBA", mask.size, (255, 255, 255, 255))
-        template.paste(only_color, (0, 0), mask)
-    template = change_print_shade(template, item)
-    return template
+    if mask is not None:
+        masked_layer = Image.new("RGBA", template.size, (0, 0, 0, 0))
+        masked_layer.paste(work_layer, (0, 0), mask)
+    else:
+        masked_layer = work_layer
+
+    result = template.copy()
+    if color_layer:
+        tinted = Image.new("RGBA", template.size, (0, 0, 0, 0))
+        tinted.paste(color_layer, (0, 0), mask)
+        result = Image.alpha_composite(result, tinted)
+    result = Image.alpha_composite(result, masked_layer)
+
+    shade_key = f"{base_item}_{'front' if side == 0 else 'back'}"
+    result = change_print_shade(result, shade_key)
+    return result
 
 
 def image_to_bytes(template):
