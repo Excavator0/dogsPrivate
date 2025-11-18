@@ -12,7 +12,7 @@ from aiogram.types import Message, CallbackQuery, InputMediaPhoto
 from aiogram.utils.deep_linking import create_start_link
 
 import keyboards.order_keyboards
-from database.db import Database
+# from database.db import Database
 from image_processing import *
 from keyboards.confirmation_keyboards import *
 from keyboards.order_keyboards import *
@@ -21,7 +21,7 @@ from config import ADMIN_ID
 from services.pricing import DEFAULT_PRICING, calculate_order_price, build_price_message
 
 router = Router()
-storage = Database()
+# storage = Database()
 
 order_types = {
     "Футболка • чёрная": "shirt_black",
@@ -178,8 +178,8 @@ async def start_with_link(message: Message, command: CommandObject, state: FSMCo
     if args not in order_types.values():
         await cmd_start(message, state)
         return
-    await state.update_data({"order_type": args, "pos": [[-1, -1], [-1, -1]], "side": 0, "stickers": []})
     order_label = next((label for label, code in order_types.items() if code == args), "Изделие")
+    await state.update_data({"order_type": args, "order_label": order_label, "pos": [[-1, -1], [-1, -1]], "side": 0, "stickers": []})
     await message.answer(text=f"Товар: {order_label}\nТеперь выбери размер изделия", reply_markup=make_sizes_keyboard(sizes[:-1]).as_markup())
     await state.set_state(Order.order_size)
 
@@ -236,8 +236,10 @@ async def back_to_main(callback: CallbackQuery):
 @router.callback_query(F.data.in_(set(order_types.values())))
 async def order_size(callback: CallbackQuery, state: FSMContext):
     item = callback.data
+    order_label = next((label for label, code in order_types.items() if code == item), "Изделие")
     await state.update_data({
         "order_type": item,
+        "order_label": order_label,
         "pos": [[-1, -1], [-1, -1]],
         "side": 0,
         "stickers": [],
@@ -893,3 +895,49 @@ async def edit_settings(callback: CallbackQuery, state: FSMContext):
         pass
     await state.update_data({"album_id": -1, "side": 0})
     await callback.message.answer_photo(file, reply_markup=make_settings_keyboard().as_markup())
+
+
+@router.message(Order.contact_name, F.text)
+async def collect_contact_name(message: Message, state: FSMContext):
+    await state.update_data({"contact_name": message.text.strip()})
+    await message.answer("Теперь укажи номер телефона:")
+    await state.set_state(Order.contact_phone)
+
+
+@router.message(Order.contact_phone, F.text)
+async def collect_contact_phone(message: Message, state: FSMContext):
+    await state.update_data({"contact_phone": message.text.strip()})
+    await message.answer("И последнее — e-mail (или отправь «—», если не хочешь делиться):")
+    await state.set_state(Order.contact_email)
+
+
+@router.message(Order.contact_email, F.text)
+async def collect_contact_email(message: Message, state: FSMContext):
+    email = message.text.strip()
+    if email == "—":
+        email = None
+    data = await state.get_data()
+    await state.update_data({"contact_email": email})
+    order_id = data.get("order_id")
+    user = storage.get_user_by_tg(message.from_user.id)
+    if order_id:
+        storage.update_order(
+            order_id,
+            contact_name=data.get("contact_name"),
+            contact_phone=data.get("contact_phone"),
+            contact_email=email,
+        )
+    if user:
+        storage.update_user_contacts(
+            user["id"],
+            phone=data.get("contact_phone"),
+            email=email,
+            name=data.get("contact_name"),
+        )
+    await message.answer(
+        "Отлично! Данные сохранены 💛\n\n"
+        "Дизайнер получил твой заказ и приступит к созданию финального макета в течение 1–2 рабочих дней. "
+        "Как только он будет готов — бот отправит тебе предпросмотр перед печатью.\n\n"
+        "💬 Подписывайся на наш Telegram-канал https://t.me/aivadog_custom — там вдохновение, новые дизайны и скидки 🩶"
+    )
+    await state.clear()

@@ -5,7 +5,7 @@ from aiogram.types import Message, InputMediaPhoto, InlineKeyboardButton, Callba
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from config import ADMIN_ID
-from database import db
+# from database import db
 
 router = Router()
 order_types = {"shirt": "Футболка", "sweat": "Свитшот", "hoodie": "Худи", "cup": "Кружка", "cap": "Кепка"}

@@ -41,11 +41,11 @@ async def main():
         BotCommand(command="/menu", description="Новый заказ")
     ]
     await bot.set_my_commands(bot_commands)
-    await create_start_link(bot, "shirt")
-    await create_start_link(bot, "cap")
-    await create_start_link(bot, "cup")
-    await create_start_link(bot, "flag")
-    await create_start_link(bot, "bag")
+    # await create_start_link(bot, "shirt")
+    # await create_start_link(bot, "cap")
+    # await create_start_link(bot, "cup")
+    # await create_start_link(bot, "flag")
+    # await create_start_link(bot, "bag")
 
 
 

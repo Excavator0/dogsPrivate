@@ -1,37 +1,21 @@
+import json
 import os
 
-from PIL import Image
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, ShippingOption, ShippingQuery, LabeledPrice, PreCheckoutQuery, CallbackQuery, \
     InputMediaPhoto
 from aiogram import Router, F
 
-from database.db import Database
-from image_processing import paste, image_to_bytes
+# from database.db import Database
 from messages import MESSAGES
 from config import PAYMENTS_TOKEN, ADMIN_ID
+from handlers.order_handlers import Order, get_base_item, zone_label, order_types
+from services.pricing import calculate_order_price
 
 router = Router()
+# storage = Database()
 
-colors = {(20, 20, 20): "Чёрный", (232, 232, 232): "Белый", (176, 37, 37): "Красный", (224, 208, 58): "Жёлтый",
-          (24, 54, 122): "Синий", (104, 31, 135): "Фиолетовый"}
-shipping_types = {"superspeed": "Супер быстрая", "post": "Почта Росии", "pickup": "Самовывоз"}
-
-PRICES = [
-    LabeledPrice(label='Футболка с принтом', amount=10000),
-    LabeledPrice(label='Кепка с принтом', amount=10000),
-    LabeledPrice(label='Флаг с принтом', amount=10000),
-    LabeledPrice(label='Стакан с принтом', amount=10000),
-    LabeledPrice(label='Рюкзак с принтом', amount=10000),
-]
-
-ITEM_PRICES = {
-    'shirt': [PRICES[0]],  # Футболка
-    'cap': [PRICES[1]],     # Кепка
-    'flag': [PRICES[2]],    # Флаг
-    'cup': [PRICES[3]],     # Стакан
-    'bag': [PRICES[4]] # Рюкзак
-}
+shipping_types = {"superspeed": "Супер быстрая", "post": "Почта России", "pickup": "Самовывоз"}
 
 SUPERSPEED_SHIPPING_OPTION = ShippingOption(
     id='superspeed',
@@ -74,19 +58,31 @@ PICKUP_SHIPPING_OPTION = ShippingOption(
 @router.callback_query(F.data == "checkout")
 async def buy_process(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    item = data["order_type"]
+    item = data.get("order_type")
+    if not item:
+        await callback.answer("Не могу найти заказ, вернись назад и начни заново.", show_alert=True)
+        return
+    price_info = data.get("price")
+    if not price_info:
+        price_info = calculate_order_price(data)
+        await state.update_data({"price": price_info})
+    base_item = get_base_item(item)
+    message_config = MESSAGES.get(base_item, next(iter(MESSAGES.values())))
+    order_label = data.get("order_label") or next((label for label, code in order_types.items() if code == item),
+                                                  "AIVADOG заказ")
+    payload = json.dumps({"order_id": data.get("order_id"), "user_id": callback.from_user.id})
     await callback.message.delete()
     await callback.message.answer_invoice(
-        title=MESSAGES[item]['item_title'],
-        description=MESSAGES[item]['item_description'],
+        title=f"{order_label}",
+        description=message_config['item_description'],
         provider_token=PAYMENTS_TOKEN,
         currency='rub',
         need_email=True,
         need_phone_number=True,
         is_flexible=True,
-        prices=ITEM_PRICES[item],
-        start_parameter='example',
-        payload='some_invoice')
+        prices=[LabeledPrice(label="AIVADOG кастом", amount=price_info["total"] * 100)],
+        start_parameter='aivadog',
+        payload=payload)
 
 
 @router.shipping_query(lambda q: True)
@@ -116,117 +112,67 @@ async def checkout_process(pre_checkout_query: PreCheckoutQuery):
 async def successful_payment(message: Message, state: FSMContext):
     data = await state.get_data()
     user_id = message.from_user.id
-    item = data["order_type"]
-    color = data["color"]
-    print_pos = data["pos"]
-    bg_deleted = data["bg_deleted"]
-    angle = data["angle"]
-    size = data["size"]
-    size_order = data["order_size"]
-    front_id = data["front_id"]
-    back_id = data["back_id"]
-    await message.answer(
-        MESSAGES[item]['successful_payment'].format(total_amount=message.successful_payment.total_amount // 100,
-                                                    currency=message.successful_payment.currency)
+    order_id = data.get("order_id")
+    if not order_id:
+        await message.answer("Не удалось сопоставить заказ. Напиши нам, мы поможем 🙏")
+        return
+    price_info = data.get("price") or calculate_order_price(data)
+    phone = message.successful_payment.order_info.phone_number
+    email = message.successful_payment.order_info.email
+    storage.log_status(order_id, "Оплачен", "Оплата через ЮKassa")
+    reward_id = data.get("discount_reward_id")
+    if reward_id:
+        storage.mark_discount_used(reward_id, order_id)
+    storage.update_order(
+        order_id,
+        payment_payload=message.successful_payment.provider_payment_charge_id,
+        shipping_option=message.successful_payment.shipping_option_id,
+        contact_phone=phone,
+        contact_email=email,
     )
-    await state.clear()
-    # отправка админу
-    await message.bot.send_message(chat_id=ADMIN_ID, text=f"Новый заказ!\n{PRICES[0].label}\nЦвет {colors.get(color)}\n"
-                                                          f"Размер: {size_order.upper()}\n"
-                                                          f"Адрес: {message.successful_payment.order_info.shipping_address.state}, "
-                                                          f"{message.successful_payment.order_info.shipping_address.city}, "
-                                                          f"{message.successful_payment.order_info.shipping_address.street_line1} "
-                                                          f"{message.successful_payment.order_info.shipping_address.street_line2}, "
-                                                          f"{message.successful_payment.order_info.shipping_address.post_code}.\n"
-                                                          f"Вариант доставки: {shipping_types.get(message.successful_payment.shipping_option_id)}\n"
-                                                          f"Номер телефона заказчика: {message.successful_payment.order_info.phone_number}\n"
-                                                          f"Сумма {message.successful_payment.total_amount // 100} {message.successful_payment.currency}"
-                                   )
-    file1 = InputMediaPhoto(media=front_id)
-    file2 = InputMediaPhoto(media=back_id)
-
-    await message.bot.send_media_group(chat_id=ADMIN_ID, media=[file1, file2])
-
-    print_id = -1
-    print_without_bg_id = -1
-    if bg_deleted[0] and bg_deleted[1]:
-        if print_pos[0] != "deleted" or print_pos[1] != "deleted":
-            image = Image.open(f"prints/{user_id}_bg_deleted.png")
-            file = image_to_bytes(image)
-            doc = await message.bot.send_document(chat_id=ADMIN_ID, document=file)
-            print_without_bg_id = doc.document.file_id
-        os.remove(f"prints/{user_id}_bg_deleted.png")
-    elif bg_deleted[0] or bg_deleted[1]:
-        if print_pos[0] == "deleted":
-            if print_pos[1] == "deleted":
-                pass
-            else:
-                if bg_deleted[1]:
-                    image = Image.open(f"prints/{user_id}_bg_deleted.png")
-                    file = image_to_bytes(image)
-                    doc = await message.bot.send_document(chat_id=ADMIN_ID, document=file)
-                    print_without_bg_id = doc.document.file_id
-                else:
-                    image = Image.open(f"prints/{user_id}.png")
-                    file = image_to_bytes(image)
-                    doc = await message.bot.send_document(chat_id=ADMIN_ID, document=file)
-                    print_id = doc.document.file_id
-        else:
-            if print_pos[1] == "deleted":
-                if bg_deleted[0]:
-                    image = Image.open(f"prints/{user_id}_bg_deleted.png")
-                    file = image_to_bytes(image)
-                    doc = await message.bot.send_document(chat_id=ADMIN_ID, document=file)
-                    print_without_bg_id = doc.document.file_id
-                else:
-                    image = Image.open(f"prints/{user_id}.png")
-                    file = image_to_bytes(image)
-                    doc = await message.bot.send_document(chat_id=ADMIN_ID, document=file)
-                    print_id = doc.document.file_id
-            else:
-                image = Image.open(f"prints/{user_id}_bg_deleted.png")
-                file = image_to_bytes(image)
-                doc = await message.bot.send_document(chat_id=ADMIN_ID, document=file)
-                print_without_bg_id = doc.document.file_id
-                image = Image.open(f"prints/{user_id}.png")
-                file = image_to_bytes(image)
-                doc = await message.bot.send_document(chat_id=ADMIN_ID, document=file)
-                print_id = doc.document.file_id
-        os.remove(f"prints/{user_id}_bg_deleted.png")
-        os.remove(f"prints/{user_id}.png")
-    else:
-        if print_pos[0] != "deleted" or print_pos[1] != "deleted":
-            image = Image.open(f"prints/{user_id}.png")
-            file = image_to_bytes(image)
-            doc = await message.bot.send_document(chat_id=ADMIN_ID, document=file)
-            print_id = doc.document.file_id
-            os.remove(f"prints/{user_id}.png")
-    # запись в бд
-    if print_pos[0] == "deleted":
-        print_pos[0] = [-1, -1]
-    if print_pos[1] == "deleted":
-        print_pos[1] = [-1, -1]
-    db = Database("database/example.db")
-    db.cursor.execute("INSERT INTO users (tg_id, name, address, city, country, phone, email, shipping_type, status) "
-                      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                      (user_id, message.from_user.full_name,
-                       message.successful_payment.order_info.shipping_address.street_line1 + ", " +
-                       message.successful_payment.order_info.shipping_address.street_line2,
-                       message.successful_payment.order_info.shipping_address.state + ", " +
-                       message.successful_payment.order_info.shipping_address.city,
-                       message.successful_payment.order_info.shipping_address.country_code,
-                       message.successful_payment.order_info.phone_number,
-                       message.successful_payment.order_info.email,
-                       message.successful_payment.shipping_option_id,
-                       "Оплачен"))
-    db.cursor.execute("INSERT INTO orders (tg_id, type, size, color, print_id, print_without_bg_id) "
-                      "VALUES (?, ?, ?, ?, ?, ?)", (user_id, item, size_order.upper(), colors.get(color), print_id, print_without_bg_id))
-    db.cursor.execute("INSERT INTO front_print (tg_id, position_x, position_y, width, height, bg_deleted, angle, pic_id) "
-                      "VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (user_id, print_pos[0][0], print_pos[0][1], size[0][0], size[0][1],
-                                                       bg_deleted[0], angle[0], front_id))
-
-    db.cursor.execute("INSERT INTO back_print (tg_id, position_x, position_y, width, height, bg_deleted, angle, pic_id) "
-                      "VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (user_id, print_pos[1][0], print_pos[1][1], size[1][0], size[1][1],
-                                                       bg_deleted[1], angle[1], back_id))
-    db.conn.commit()
-    db.close()
+    await message.answer(
+        MESSAGES[get_base_item(data["order_type"])]["successful_payment"].format(
+            total_amount=message.successful_payment.total_amount // 100,
+            currency=message.successful_payment.currency)
+    )
+    front_id = data.get("front_id")
+    back_id = data.get("back_id")
+    zone = zone_label(data.get("order_zone", "chest"))
+    customization = data.get("customization", "photo")
+    customization_text = {
+        "ready": "Готовый дизайн AIVADOG",
+        "photo": "Фото питомца",
+        "stickers": "Фото + стикеры"
+    }.get(customization, "Фото питомца")
+    order_label = data.get("order_label") or next((label for label, code in order_types.items()
+                                                  if code == data.get("order_type")), "Изделие")
+    admin_summary = (
+        f"Новый заказ #{data.get('order_number', order_id)}\n"
+        f"Изделие: {order_label}\n"
+        f"Размер: {data.get('order_size')}\n"
+        f"Зона: {zone}\n"
+        f"Кастомизация: {customization_text}\n"
+        f"Имя питомца: {data.get('pet_name', '—')}\n"
+        f"Стикеры: {', '.join(data.get('stickers', [])) or 'Без стикеров'}\n"
+        f"Стоимость: {price_info['total']} ₽\n"
+        f"Способ доставки: {shipping_types.get(message.successful_payment.shipping_option_id, 'Не выбран')}\n"
+        f"Контакты: {message.successful_payment.order_info.phone_number} / "
+        f"{message.successful_payment.order_info.email}"
+    )
+    await message.bot.send_message(chat_id=ADMIN_ID, text=admin_summary)
+    media = []
+    if front_id:
+        media.append(InputMediaPhoto(media=front_id, caption="Фронт"))
+    if back_id:
+        media.append(InputMediaPhoto(media=back_id, caption="Спина"))
+    if media:
+        await message.bot.send_media_group(chat_id=ADMIN_ID, media=media)
+    for suffix in ("_bg_deleted.png", ".png"):
+        path = f"prints/{user_id}{suffix}"
+        if os.path.exists(path):
+            os.remove(path)
+    await message.answer(
+        "После оплаты мы начинаем подготовку макета и свяжемся с тобой для финального согласования. "
+        "Теперь давай оставим контакты, чтобы команда быстро вышла на связь.\n\nКак тебя зовут?"
+    )
+    await state.set_state(Order.contact_name)
