@@ -214,6 +214,25 @@ class Database:
             cur = conn.execute("SELECT * FROM users WHERE tg_id = ?", (tg_id,))
             return cur.fetchone()
 
+    def get_user_by_id(self, user_id: int):
+        with self._connect() as conn:
+            cur = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+            return cur.fetchone()
+
+    def increment_user_stats(self, user_id: int, total_price: int):
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE users
+                SET total_spent = COALESCE(total_spent, 0) + ?,
+                    orders_count = COALESCE(orders_count, 0) + 1,
+                    last_active = ?
+                WHERE id = ?
+                """,
+                (total_price, utcnow(), user_id),
+            )
+            conn.commit()
+
     def update_user_contacts(
         self,
         user_id: int,
@@ -267,10 +286,12 @@ class Database:
         discount_percent: int = 0,
         total_price: Optional[int] = None,
         status: str = "draft",
+        notes: Optional[Dict[str, Any]] = None,
     ) -> Tuple[int, str]:
         created = utcnow()
         stickers_json = json.dumps(stickers or [], ensure_ascii=False)
         total = total_price if total_price is not None else base_price + addons_price
+        notes_json = json.dumps(notes or {}, ensure_ascii=False)
         with self._connect() as conn:
             cur = conn.cursor()
             cur.execute(
@@ -278,9 +299,9 @@ class Database:
                 INSERT INTO orders (
                     user_id, item_code, zone, size, customization, stickers, sticker_zone,
                     pet_name, status, base_price, addons_price, discount_percent,
-                    total_price, created_at, updated_at
+                    total_price, created_at, updated_at, notes_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     user_id,
@@ -298,6 +319,7 @@ class Database:
                     total,
                     created,
                     created,
+                    notes_json,
                 ),
             )
             order_id = cur.lastrowid
@@ -325,16 +347,42 @@ class Database:
             cur = conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,))
             return cur.fetchone()
 
+    def get_order_with_user(self, order_id: int):
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                SELECT orders.*, users.tg_id, users.username, users.full_name
+                FROM orders
+                JOIN users ON users.id = orders.user_id
+                WHERE orders.id = ?
+                """,
+                (order_id,),
+            )
+            return cur.fetchone()
+
     def get_order_by_number(self, order_number: str):
         with self._connect() as conn:
             cur = conn.execute("SELECT * FROM orders WHERE order_number = ?", (order_number,))
+            return cur.fetchone()
+
+    def get_order_by_number_with_user(self, order_number: str):
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                SELECT orders.*, users.tg_id, users.username, users.full_name
+                FROM orders
+                JOIN users ON users.id = orders.user_id
+                WHERE orders.order_number = ?
+                """,
+                (order_number,),
+            )
             return cur.fetchone()
 
     def list_recent_orders(self, limit: int = 10):
         with self._connect() as conn:
             cur = conn.execute(
                 """
-                SELECT orders.*, users.full_name, users.phone
+                SELECT orders.*, users.full_name, users.phone, users.tg_id
                 FROM orders
                 JOIN users ON users.id = orders.user_id
                 ORDER BY orders.created_at DESC
@@ -362,6 +410,31 @@ class Database:
             """,
             (order_id, status, utcnow(), comment),
         )
+
+    def get_order_history(self, order_id: int):
+        with self._connect() as conn:
+            cur = conn.execute(
+                "SELECT * FROM order_status_history WHERE order_id = ? ORDER BY created_at ASC",
+                (order_id,),
+            )
+            return cur.fetchall()
+
+    def update_order_notes(self, order_id: int, **fields):
+        with self._connect() as conn:
+            cur = conn.execute("SELECT notes_json FROM orders WHERE id = ?", (order_id,))
+            row = cur.fetchone()
+            existing = json.loads(row["notes_json"]) if row and row["notes_json"] else {}
+            existing.update(fields)
+            conn.execute(
+                "UPDATE orders SET notes_json = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(existing, ensure_ascii=False), utcnow(), order_id),
+            )
+            conn.commit()
+
+    def has_ugc_submission(self, order_id: int) -> bool:
+        with self._connect() as conn:
+            cur = conn.execute("SELECT 1 FROM ugc_submissions WHERE order_id = ? LIMIT 1", (order_id,))
+            return cur.fetchone() is not None
 
     # ---------------- Рефералы и скидки ----------------
     def create_referral_link(self, owner_user_id: int, order_id: int, percent: int, hours_valid: int = 48) -> str:

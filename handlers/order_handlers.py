@@ -2,35 +2,42 @@ import json
 import os
 import time
 from datetime import datetime, timedelta
+from functools import lru_cache
+from typing import Union
 
-from aiogram import Router, F
+from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.filters import Command, CommandStart, CommandObject
+from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import StatesGroup, State
-from aiogram.types import Message, CallbackQuery, InputMediaPhoto
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import CallbackQuery, InputMediaPhoto, InlineKeyboardButton, Message
 from aiogram.utils.deep_linking import create_start_link
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 import keyboards.order_keyboards
-# from database.db import Database
+from config import ADMIN_ID
+from database.db import Database
 from image_processing import *
 from keyboards.confirmation_keyboards import *
 from keyboards.order_keyboards import *
 from keyboards.print_processing_keyboards import *
-from config import ADMIN_ID
-from services.pricing import DEFAULT_PRICING, calculate_order_price, build_price_message
+from services.designs import find_design, get_design_preview, list_ready_designs
+from services.pricing import DEFAULT_PRICING, build_price_message, calculate_order_price
 
 router = Router()
-# storage = Database()
+storage = Database()
 
 order_types = {
     "Футболка • чёрная": "shirt_black",
     "Футболка • серая": "shirt_grey",
     "Футболка • зелёная": "shirt_green",
     "Футболка • розовая": "shirt_pink",
+    "Худи": "hoodie",
+    "Свитшот": "sweatshirt",
+    "Кофта на молнии": "zip",
+    "Штаны": "pants",
 }
 
-template_sizes = {"shirt": (1099, 1389)}
 sizes = ["XS", "S", "M", "L", "XL", "2XL", "One size"]
 size_step = 50
 
@@ -40,7 +47,31 @@ zone_schemes = {
         ("Спина", "back"),
         ("Левый рукав", "sleeve_left"),
         ("Правый рукав", "sleeve_right"),
-    ]
+    ],
+    "hoodie": [
+        ("Грудь", "chest"),
+        ("Спина", "back"),
+        ("Левый рукав", "sleeve_left"),
+        ("Правый рукав", "sleeve_right"),
+        ("Капюшон", "hood"),
+    ],
+    "sweatshirt": [
+        ("Грудь", "chest"),
+        ("Спина", "back"),
+        ("Левый рукав", "sleeve_left"),
+        ("Правый рукав", "sleeve_right"),
+    ],
+    "zip": [
+        ("Грудь", "chest"),
+        ("Спина", "back"),
+        ("Левый рукав", "sleeve_left"),
+        ("Правый рукав", "sleeve_right"),
+        ("Капюшон", "hood"),
+    ],
+    "pants": [
+        ("Левая штанина", "pant_left"),
+        ("Правая штанина", "pant_right"),
+    ],
 }
 
 sticker_catalog = [
@@ -51,12 +82,101 @@ sticker_catalog = [
     ("⚽ Мяч", "ball"),
 ]
 
+READY_DESIGNS = list_ready_designs()
+DESIGN_INDEX = {design.id: idx for idx, design in enumerate(READY_DESIGNS)}
+DELIVERY_RESPONSES = {
+    "delivery_pickup": "Самовывоз доступен по адресу: Обводного канала, 223-225. Напиши удобный день и время — подготовим заказ.",
+    "delivery_courier": "Пришли, пожалуйста, адрес в Санкт-Петербурге и контактный номер — организуем курьера.",
+    "delivery_cdek": "Отправим СДЭКом. Напиши ФИО получателя, адрес и индекс, чтобы мы подготовили отправку.",
+}
+
+
+def designs_available() -> bool:
+    return bool(READY_DESIGNS)
+
+
+def _design_caption(design) -> str:
+    return f"«{design.title}» — фирменный макет AIVADOG. Добавим твоего питомца и покажем предпросмотр!"
+
+
+def _design_keyboard(mode: str, index: int, design_id: str) -> InlineKeyboardBuilder:
+    total = len(READY_DESIGNS)
+    builder = InlineKeyboardBuilder()
+    if total > 1:
+        prev_index = (index - 1) % total
+        next_index = (index + 1) % total
+        builder.add(InlineKeyboardButton(text="⬅️", callback_data=f"{mode}_show_{prev_index}"))
+        builder.add(InlineKeyboardButton(text="➡️", callback_data=f"{mode}_show_{next_index}"))
+        builder.adjust(2)
+    action_text = "Хочу такой!" if mode == "example" else "Выбрать этот дизайн"
+    action_callback = f"{mode}_pick_{design_id}"
+    builder.row(InlineKeyboardButton(text=action_text, callback_data=action_callback))
+    back_callback = "back_to_main" if mode == "example" else "design_cancel"
+    back_text = "🔙 Назад к выбору" if mode == "example" else "Назад"
+    builder.row(InlineKeyboardButton(text=back_text, callback_data=back_callback))
+    return builder
+
+
+async def send_design_card(message: Message, index: int, mode: str, edit: bool = False):
+    if not READY_DESIGNS:
+        await message.answer("Каталог дизайнов появится совсем скоро 💛")
+        return
+    index = index % len(READY_DESIGNS)
+    design = READY_DESIGNS[index]
+    file = get_design_preview(design)
+    keyboard = _design_keyboard(mode, index, design.id).as_markup()
+    caption = _design_caption(design)
+    if edit:
+        media = InputMediaPhoto(media=file, caption=caption)
+        await message.edit_media(media, reply_markup=keyboard)
+    else:
+        await message.answer_photo(photo=file, caption=caption, reply_markup=keyboard)
+
+
+async def _reply(target: Union[Message, CallbackQuery], text: str, **kwargs):
+    if isinstance(target, CallbackQuery):
+        return await target.message.answer(text, **kwargs)
+    return await target.answer(text, **kwargs)
+
+
+async def _prompt_ready_design_selection(target: Union[Message, CallbackQuery], state: FSMContext, start_index: int = 0):
+    if not designs_available():
+        await _reply(target, "Каталог готовых макетов временно недоступен. Отправь фото питомца, и дизайнер подготовит принт.")
+        await state.set_state(Order.image_sent)
+        return
+    await send_design_card(target.message if isinstance(target, CallbackQuery) else target, start_index, "design")
+    await state.set_state(Order.ready_design)
+
+
+async def _handle_preselected_ready(target: Union[Message, CallbackQuery], state: FSMContext):
+    data = await state.get_data()
+    design_title = data.get("selected_design_title")
+    design_id = data.get("selected_design_id")
+    if not design_id or not design_title:
+        await _prompt_ready_design_selection(target, state)
+        return
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="Сменить макет", callback_data="design_change"))
+    await _reply(
+        target,
+        f"Ты выбрал макет «{design_title}». Теперь загрузи фото питомца документом (PNG/JPG до 2 МБ). "
+        "Ракурс должен быть похож на пример.",
+        reply_markup=builder.as_markup(),
+    )
+    await state.update_data({"preferred_customization": None, "customization": "ready"})
+    await state.set_state(Order.image_sent)
+
 @router.callback_query(F.data.startswith("zone_"))
 async def choose_customization(callback: CallbackQuery, state: FSMContext):
     zone = callback.data.replace("zone_", "")
     await state.update_data({"order_zone": zone})
+    data = await state.get_data()
+    if data.get("preferred_customization") == "ready":
+        await _handle_preselected_ready(callback, state)
+        return
+    zone_title = zone_label(zone)
     await callback.message.edit_text(
-        text="Выбери вариант кастомизации:"
+        text=f"Выбери вариант кастомизации для зоны «{zone_title}»:"
     )
     await callback.message.edit_reply_markup(
         reply_markup=make_customization_keyboard().as_markup()
@@ -76,11 +196,15 @@ async def customization_selected(callback: CallbackQuery, state: FSMContext):
     choice = callback.data.replace("custom_", "")
     await state.update_data({"customization": choice, "stickers_planned": choice == "stickers"})
     await callback.answer()
+    if choice == "ready":
+        data = await state.get_data()
+        start_index = DESIGN_INDEX.get(data.get("selected_design_id"), 0)
+        await _prompt_ready_design_selection(callback, state, start_index)
+        await callback.message.delete()
+        return
     await callback.message.delete()
     await callback.message.answer(
-        text="Отправь фото своего питомца документом (PNG/JPG до 2 МБ), чтобы я подготовил макет."
-             if choice != "ready"
-             else "Выбери фото питомца документом (PNG/JPG до 2 МБ). Ракурс должен быть похож на выбранный макет 🐶"
+        "Отправь фото своего питомца документом (PNG/JPG до 2 МБ), чтобы я подготовил макет."
     )
     await state.set_state(Order.image_sent)
 
@@ -97,9 +221,11 @@ def get_base_item(item_code: str) -> str:
     return item_code.split("_", 1)[0]
 
 
+@lru_cache(maxsize=32)
 def get_template_bounds(item_code: str) -> tuple[int, int]:
-    base = get_base_item(item_code)
-    return template_sizes.get(base, template_sizes["shirt"])
+    template_path = _resolve_template_path(item_code, 0)
+    with Image.open(template_path) as template:
+        return template.size
 
 
 def zone_label(zone_code: str) -> str:
@@ -121,6 +247,7 @@ class Order(StatesGroup):
     order_size = State()
     zone = State()
     customization = State()
+    ready_design = State()
     image_sent = State()
     pet_name = State()
     sticker_zone = State()
@@ -140,9 +267,18 @@ class Order(StatesGroup):
     contact_email = State()
 
 
+class UGCSubmission(StatesGroup):
+    waiting_photo = State()
+    waiting_order_number = State()
+
+
 @router.message(Command("menu"))
 async def cmd_start(message: Message, state: FSMContext):
+    await state.clear()
     storage.upsert_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
+    user_row = storage.get_user_by_tg(message.from_user.id)
+    if user_row:
+        storage.set_subscription(user_row["id"], True)
     chat_id = message.chat.id
     await message.answer(
         text=("Привет! Я — AIVADOG-бот 🐾\n\n"
@@ -155,7 +291,15 @@ async def cmd_start(message: Message, state: FSMContext):
               "С чего начнём?👇"),
         reply_markup=make_main_menu_keyboard().as_markup()
     )
-    await state.update_data({"chat_id": chat_id, "pos": [[-1, -1], [-1, -1]], "side": 0, "stickers": []})
+    await state.update_data({
+        "chat_id": chat_id,
+        "pos": [[-1, -1], [-1, -1]],
+        "side": 0,
+        "stickers": [],
+        "preferred_customization": None,
+        "selected_design_id": None,
+        "selected_design_title": None,
+    })
 
 
 @router.message(CommandStart(deep_link=False))
@@ -166,6 +310,9 @@ async def start_default(message: Message, state: FSMContext):
 @router.message(CommandStart(deep_link=True))
 async def start_with_link(message: Message, command: CommandObject, state: FSMContext):
     storage.upsert_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
+    user_row = storage.get_user_by_tg(message.from_user.id)
+    if user_row:
+        storage.set_subscription(user_row["id"], True)
     args = command.args or ""
     if args.startswith("ref-"):
         user = storage.get_user_by_tg(message.from_user.id)
@@ -212,10 +359,95 @@ async def show_brand_info(callback: CallbackQuery):
 
 @router.callback_query(F.data == "show_examples")
 async def show_examples(callback: CallbackQuery):
+    if not designs_available():
+        await callback.message.edit_text(
+            text="Галерея готовых дизайнов скоро появится, а пока можно сразу выбрать изделие 👇"
+        )
+        await callback.message.edit_reply_markup(reply_markup=make_back_to_main_keyboard().as_markup())
+        return
     await callback.message.edit_text(
-        text="Скоро добавим примеры дизайнов. А пока можете выбрать изделие 👇"
+        text="Вот несколько наших принтов-шаблонов. Листай стрелками и жми «Хочу такой!» 👇"
     )
     await callback.message.edit_reply_markup(reply_markup=make_back_to_main_keyboard().as_markup())
+    await send_design_card(callback.message, 0, "example")
+
+
+@router.callback_query(F.data.startswith("example_show_"))
+async def example_switch(callback: CallbackQuery):
+    if not designs_available():
+        await callback.answer()
+        return
+    index = int(callback.data.replace("example_show_", ""))
+    await send_design_card(callback.message, index, "example", edit=True)
+
+
+@router.callback_query(F.data.startswith("example_pick_"))
+async def example_pick(callback: CallbackQuery, state: FSMContext):
+    design_id = callback.data.replace("example_pick_", "")
+    design = find_design(design_id)
+    if not design:
+        await callback.answer("Не удалось загрузить макет", show_alert=True)
+        return
+    await state.update_data({
+        "selected_design_id": design.id,
+        "selected_design_title": design.title,
+        "preferred_customization": "ready",
+    })
+    await callback.message.delete()
+    await callback.message.answer(
+        f"Дизайн «{design.title}» сохранён! Теперь выбери изделие 👇",
+        reply_markup=make_type_keyboard(order_types).as_markup()
+    )
+    await state.set_state(Order.order_type)
+
+
+@router.callback_query(Order.ready_design, F.data.startswith("design_show_"))
+async def design_switch(callback: CallbackQuery, state: FSMContext):
+    if not designs_available():
+        await callback.answer()
+        return
+    index = int(callback.data.replace("design_show_", ""))
+    await send_design_card(callback.message, index, "design", edit=True)
+    await callback.answer()
+    await state.set_state(Order.ready_design)
+
+
+@router.callback_query(F.data == "design_change")
+async def design_change(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    index = DESIGN_INDEX.get(data.get("selected_design_id"), 0)
+    await state.update_data({"selected_design_id": None, "selected_design_title": None})
+    await _prompt_ready_design_selection(callback, state, index)
+
+
+@router.callback_query(Order.ready_design, F.data == "design_cancel")
+async def design_cancel(callback: CallbackQuery, state: FSMContext):
+    await callback.message.delete()
+    await callback.message.answer(
+        "Выбери вариант кастомизации:",
+        reply_markup=make_customization_keyboard().as_markup()
+    )
+    await state.set_state(Order.customization)
+
+
+@router.callback_query(Order.ready_design, F.data.startswith("design_pick_"))
+async def design_pick(callback: CallbackQuery, state: FSMContext):
+    design_id = callback.data.replace("design_pick_", "")
+    design = find_design(design_id)
+    if not design:
+        await callback.answer("Не удалось выбрать макет", show_alert=True)
+        return
+    await state.update_data({
+        "selected_design_id": design.id,
+        "selected_design_title": design.title,
+        "preferred_customization": None,
+        "customization": "ready",
+    })
+    await callback.message.delete()
+    await callback.message.answer(
+        f"Отлично! Теперь загрузи фото своего питомца документом (PNG/JPG до 2 МБ), чтобы мы вставили его в макет «{design.title}».",
+    )
+    await state.set_state(Order.image_sent)
 
 
 @router.callback_query(F.data == "back_to_main")
@@ -713,6 +945,11 @@ async def confirm_print(callback: CallbackQuery, state: FSMContext):
         "stickers": "Фото + стикеры",
     }.get(customization_code, "Фото питомца")
     pet_name = data.get("pet_name", "—")
+    notes = {}
+    if data.get("selected_design_id"):
+        notes["ready_design_id"] = data["selected_design_id"]
+    if data.get("selected_design_title"):
+        notes["ready_design_title"] = data["selected_design_title"]
 
     user_row = storage.get_user_by_tg(user_id)
     if not user_row:
@@ -730,6 +967,7 @@ async def confirm_print(callback: CallbackQuery, state: FSMContext):
             stickers=stickers_codes,
             sticker_zone=data.get("sticker_zone"),
             pet_name=pet_name,
+            notes=notes,
         )
         await state.update_data({"order_id": order_id, "order_number": order_number})
     else:
@@ -744,6 +982,8 @@ async def confirm_print(callback: CallbackQuery, state: FSMContext):
             sticker_zone=data.get("sticker_zone"),
             pet_name=pet_name,
         )
+        if notes:
+            storage.update_order_notes(order_id, **notes)
     storage.attach_preview(order_id, front_id, back_id)
 
     summary = (
@@ -753,6 +993,10 @@ async def confirm_print(callback: CallbackQuery, state: FSMContext):
         f"Зона нанесения: {zone}\n"
         f"Кастомизация: {customization_text}\n"
         f"Имя питомца: {pet_name}\n"
+    )
+    if data.get("selected_design_title"):
+        summary += f"Дизайн: {data['selected_design_title']}\n"
+    summary += (
         f"Стикеры: {stickers_text}\n\n"
         "Всё нравится?"
     )
@@ -897,6 +1141,27 @@ async def edit_settings(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer_photo(file, reply_markup=make_settings_keyboard().as_markup())
 
 
+@router.callback_query(F.data == "mailing_unsubscribe")
+async def mailing_unsubscribe(callback: CallbackQuery):
+    user = storage.get_user_by_tg(callback.from_user.id)
+    if user:
+        storage.set_subscription(user["id"], False)
+    await callback.answer("Рассылки отключены 💛", show_alert=True)
+    await callback.message.answer(
+        "Вы отписались от рассылок AIVADOG 💛. Чтобы снова получать новости, просто отправь /start"
+    )
+
+
+@router.callback_query(F.data.in_(set(DELIVERY_RESPONSES)))
+async def delivery_choice(callback: CallbackQuery):
+    text = DELIVERY_RESPONSES.get(callback.data)
+    if not text:
+        await callback.answer()
+        return
+    await callback.answer()
+    await callback.message.answer(text)
+
+
 @router.message(Order.contact_name, F.text)
 async def collect_contact_name(message: Message, state: FSMContext):
     await state.update_data({"contact_name": message.text.strip()})
@@ -940,4 +1205,75 @@ async def collect_contact_email(message: Message, state: FSMContext):
         "Как только он будет готов — бот отправит тебе предпросмотр перед печатью.\n\n"
         "💬 Подписывайся на наш Telegram-канал https://t.me/aivadog_custom — там вдохновение, новые дизайны и скидки 🩶"
     )
+    await state.clear()
+
+
+@router.callback_query(F.data.startswith("ugc_start_"))
+async def ugc_start(callback: CallbackQuery, state: FSMContext):
+    order_id = int(callback.data.replace("ugc_start_", ""))
+    user = storage.get_user_by_tg(callback.from_user.id)
+    if not user:
+        await callback.answer("Сначала запусти бота командой /start", show_alert=True)
+        return
+    order = storage.get_order(order_id)
+    if not order or order["user_id"] != user["id"]:
+        await callback.answer("Не нашли этот заказ 😔", show_alert=True)
+        return
+    if storage.has_ugc_submission(order_id):
+        await callback.answer("По этому заказу скидка уже выдана", show_alert=True)
+        return
+    await state.set_state(UGCSubmission.waiting_photo)
+    await state.update_data({"ugc_order_id": order_id})
+    await callback.message.answer(
+        "Хочешь скидку на следующий заказ? Пришли фото своего изделия 📸"
+    )
+    await callback.answer()
+
+
+@router.message(UGCSubmission.waiting_photo, F.photo | F.document)
+async def ugc_photo_received(message: Message, state: FSMContext):
+    if message.photo:
+        file_id = message.photo[-1].file_id
+    else:
+        if not message.document.mime_type or not message.document.mime_type.startswith("image/"):
+            await message.answer("Нужен файл с изображением. Попробуй ещё раз 📎")
+            return
+        file_id = message.document.file_id
+    await state.update_data({"ugc_photo_id": file_id})
+    await message.answer("Отлично! Теперь введи номер заказа (формат AVD-XXXXXX):")
+    await state.set_state(UGCSubmission.waiting_order_number)
+
+
+@router.message(UGCSubmission.waiting_photo)
+async def ugc_waiting_photo_text(message: Message):
+    await message.answer("Пришли, пожалуйста, фото изделия 📸")
+
+
+@router.message(UGCSubmission.waiting_order_number, F.text)
+async def ugc_order_number(message: Message, state: FSMContext):
+    order_number = message.text.strip().upper()
+    data = await state.get_data()
+    order = storage.get_order(data.get("ugc_order_id"))
+    user = storage.get_user_by_tg(message.from_user.id)
+    if not order or not user:
+        await message.answer("Не удалось сопоставить заказ. Напиши менеджеру, мы поможем 🙏")
+        await state.clear()
+        return
+    if order["order_number"] != order_number:
+        await message.answer("Номер заказа не совпадает. Проверь формат и попробуй ещё раз.")
+        return
+    if storage.has_ugc_submission(order["id"]):
+        await message.answer("По этому заказу уже выдавали скидку. Спасибо за отзыв! 💛")
+        await state.clear()
+        return
+    promo_code = f"UGC-{order_number[-4:]}"
+    storage.create_ugc_submission(order["id"], user["id"], data.get("ugc_photo_id"), percent=3, promo_code=promo_code)
+    storage.grant_discount(user["id"], percent=3, source="ugc", metadata={"order_id": order["id"]})
+    await message.answer("Спасибо! Фото отправлено менеджеру, а скидка −3% уже активна на следующий заказ ✨")
+    if data.get("ugc_photo_id"):
+        await message.bot.send_photo(
+            ADMIN_ID,
+            data["ugc_photo_id"],
+            caption=f"UGC от @{message.from_user.username or message.from_user.id} по заказу #{order_number}",
+        )
     await state.clear()

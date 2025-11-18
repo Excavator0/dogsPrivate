@@ -6,14 +6,15 @@ from aiogram.types import Message, ShippingOption, ShippingQuery, LabeledPrice, 
     InputMediaPhoto
 from aiogram import Router, F
 
-# from database.db import Database
+from database.db import Database
 from messages import MESSAGES
 from config import PAYMENTS_TOKEN, ADMIN_ID
 from handlers.order_handlers import Order, get_base_item, zone_label, order_types
 from services.pricing import calculate_order_price
+from services.notifications import notify_order_via_email
 
 router = Router()
-# storage = Database()
+storage = Database()
 
 shipping_types = {"superspeed": "Супер быстрая", "post": "Почта России", "pickup": "Самовывоз"}
 
@@ -130,6 +131,9 @@ async def successful_payment(message: Message, state: FSMContext):
         contact_phone=phone,
         contact_email=email,
     )
+    order_row = storage.get_order(order_id)
+    if order_row:
+        storage.increment_user_stats(order_row["user_id"], price_info["total"])
     await message.answer(
         MESSAGES[get_base_item(data["order_type"])]["successful_payment"].format(
             total_amount=message.successful_payment.total_amount // 100,
@@ -146,6 +150,7 @@ async def successful_payment(message: Message, state: FSMContext):
     }.get(customization, "Фото питомца")
     order_label = data.get("order_label") or next((label for label, code in order_types.items()
                                                   if code == data.get("order_type")), "Изделие")
+    design_title = data.get("selected_design_title")
     admin_summary = (
         f"Новый заказ #{data.get('order_number', order_id)}\n"
         f"Изделие: {order_label}\n"
@@ -159,6 +164,8 @@ async def successful_payment(message: Message, state: FSMContext):
         f"Контакты: {message.successful_payment.order_info.phone_number} / "
         f"{message.successful_payment.order_info.email}"
     )
+    if design_title:
+        admin_summary += f"\nДизайн: {design_title}"
     await message.bot.send_message(chat_id=ADMIN_ID, text=admin_summary)
     media = []
     if front_id:
@@ -167,6 +174,7 @@ async def successful_payment(message: Message, state: FSMContext):
         media.append(InputMediaPhoto(media=back_id, caption="Спина"))
     if media:
         await message.bot.send_media_group(chat_id=ADMIN_ID, media=media)
+    await notify_order_via_email(message.bot, storage, order_id, front_id, back_id, price_info["total"])
     for suffix in ("_bg_deleted.png", ".png"):
         path = f"prints/{user_id}{suffix}"
         if os.path.exists(path):
