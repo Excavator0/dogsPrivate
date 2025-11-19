@@ -27,9 +27,11 @@ def make_zone_keyboard(zones: list[tuple[str, str]]) -> InlineKeyboardBuilder:
     return builder
 
 
-def make_customization_keyboard() -> InlineKeyboardBuilder:
+def make_customization_keyboard(show_ready_design: bool = False) -> InlineKeyboardBuilder:
     builder = InlineKeyboardBuilder()
-    builder.add(InlineKeyboardButton(text="Готовый дизайн AIVADOG", callback_data="custom_ready"))
+    # Показываем кнопку макетов только когда они доступны
+    if show_ready_design:
+        builder.add(InlineKeyboardButton(text="Готовый дизайн AIVADOG", callback_data="custom_ready"))
     builder.add(InlineKeyboardButton(text="Фото питомца без дизайна", callback_data="custom_photo"))
     builder.add(InlineKeyboardButton(text="Добавить стикеры", callback_data="custom_stickers"))
     builder.adjust(1)

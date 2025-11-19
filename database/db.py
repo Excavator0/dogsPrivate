@@ -451,27 +451,42 @@ class Database:
             conn.commit()
             return code
 
-    def register_referral_hit(self, code: str, invited_user_id: int) -> bool:
+    def register_referral_hit(self, code: str, invited_user_id: int) -> Tuple[bool, Optional[int]]:
         now = utcnow()
         with self._connect() as conn:
             cur = conn.cursor()
             cur.execute("SELECT * FROM referral_links WHERE code = ?", (code,))
             link = cur.fetchone()
             if not link or link["owner_user_id"] == invited_user_id:
-                return False
+                return False, None
+            
             cur.execute(
                 "INSERT OR IGNORE INTO referral_hits (code, invited_user_id, created_at) VALUES (?, ?, ?)",
                 (code, invited_user_id, now),
             )
+            
+            activated_now = False
+            owner_tg_id = None
+            
             cur.execute("SELECT COUNT(*) as cnt FROM referral_hits WHERE code = ?", (code,))
-            if cur.fetchone()["cnt"] >= 1 and not link["activated"]:
+            count = cur.fetchone()["cnt"]
+            
+            if count >= 1 and not link["activated"]:
                 cur.execute(
                     "UPDATE referral_links SET activated = 1, activated_at = ? WHERE code = ?",
                     (now, code),
                 )
                 self._create_discount_reward(cur, user_id=link["owner_user_id"], percent=link["percent"], source="referral", metadata={"code": code})
+                activated_now = True
+                
+                # Get owner tg_id
+                cur.execute("SELECT tg_id FROM users WHERE id = ?", (link["owner_user_id"],))
+                owner_row = cur.fetchone()
+                if owner_row:
+                    owner_tg_id = owner_row["tg_id"]
+
             conn.commit()
-            return True
+            return activated_now, owner_tg_id
 
     def _create_discount_reward(
         self,

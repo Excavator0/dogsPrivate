@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 from typing import Optional
 
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, ImageChops
 import cv2
 from io import BytesIO
 from aiogram.types import BufferedInputFile
@@ -45,6 +45,87 @@ lighter_shade_factor = 0.92
 TEMPLATES_DIR = Path("templates")
 CLOTHES_DIR = TEMPLATES_DIR / "одежда_png"
 MASKS_DIR = TEMPLATES_DIR / "masks"
+
+
+def _iter_clothes_assets():
+    """
+    Сканирует папку с одеждой и собирает пути картинок по base/side.
+    Ожидаемые имена файлов:
+      - {base}_front.png
+      - {base}_back.png
+      - {base}_front_{variant}.png
+      - {base}_back_{variant}.png
+    Возвращает словарь: {(base, side): [Path, ...]}
+    """
+    side_markers = ("_front", "_back")
+    mapping: dict[tuple[str, str], list[Path]] = {}
+    if not CLOTHES_DIR.exists():
+        return mapping
+    for path in CLOTHES_DIR.glob("*.png"):
+        name = path.stem  # without .png
+        side = None
+        base = None
+        for marker in side_markers:
+            if marker in name:
+                side = "front" if marker == "_front" else "back"
+                base = name.split(marker, 1)[0]
+                break
+        if not base or not side:
+            continue
+        mapping.setdefault((base, side), []).append(path)
+    return mapping
+
+
+def _build_mask_from_images(image_paths: list[Path]) -> Optional[Image.Image]:
+    """
+    Формирует маску (L) как объединение непрозрачных пикселей по всем вариантам цвета.
+    """
+    if not image_paths:
+        return None
+    base_img = Image.open(image_paths[0]).convert("RGBA")
+    width, height = base_img.size
+    union = Image.new("L", (width, height), 0)
+
+    for path in image_paths:
+        img = Image.open(path).convert("RGBA")
+        if img.size != (width, height):
+            img = img.resize((width, height), Image.Resampling.BICUBIC)
+        alpha = img.split()[-1]  # A
+        # Считаем пиксель частью одежды, если альфа > ~10
+        binary = alpha.point(lambda a: 255 if a > 10 else 0, mode="L")
+        union = ImageChops.lighter(union, binary)
+    return union
+
+
+def generate_masks_for_clothes() -> dict:
+    """
+    Пересоздаёт маски для всех вещей из папки 'templates/одежда_png'.
+    1) Очищает 'templates/masks' от старых файлов
+    2) Для каждой пары (base, side) создаёт 'mask_{base}_{side}.png'
+    Возвращает краткую статистику.
+    """
+    MASKS_DIR.mkdir(parents=True, exist_ok=True)
+    # Удаляем старые маски
+    removed = 0
+    for old in MASKS_DIR.glob("*.png"):
+        old.unlink(missing_ok=True)
+        removed += 1
+
+    mapping = _iter_clothes_assets()
+    created = 0
+    skipped = 0
+    results = {}
+    for (base, side), paths in mapping.items():
+        mask = _build_mask_from_images(paths)
+        if not mask:
+            skipped += 1
+            continue
+        out_path = MASKS_DIR / f"mask_{base}_{side}.png"
+        mask.save(out_path, "PNG")
+        created += 1
+        results[f"{base}_{side}"] = str(out_path)
+
+    return {"removed": removed, "created": created, "skipped": skipped, "total_pairs": len(mapping), "outputs": results}
 
 
 def change_print_shade(image, item):
@@ -162,13 +243,37 @@ def paste(image, color, pos, item, side, angle, bg_deleted=False):
     return result
 
 
-def image_to_bytes(template):
+def image_to_bytes(template: Image.Image) -> BufferedInputFile:
+    """
+    Готовит изображение к отправке как фото в Telegram:
+    - даунскейлит до лимита по большей стороне (например, 4096)
+    - убирает альфу, конвертирует в RGB
+    - сохраняет как JPEG (умеренный quality), чтобы избежать ошибок по размеру/альфе
+    """
+    max_side = 4096
+    width, height = template.size
+    if width <= 0 or height <= 0:
+        # страхуемся от нулевых размеров
+        width = max(1, width)
+        height = max(1, height)
+        template = template.resize((width, height))
+    scale = 1.0
+    if max(width, height) > max_side:
+        scale = max_side / float(max(width, height))
+        new_size = (max(1, int(width * scale)), max(1, int(height * scale)))
+        template = template.resize(new_size, Image.Resampling.LANCZOS)
+    # снимаем альфу
+    if template.mode in ("RGBA", "LA"):
+        background = Image.new("RGB", template.size, (255, 255, 255))
+        background.paste(template, mask=template.split()[-1])
+        img = background
+    else:
+        img = template.convert("RGB")
     bio = BytesIO()
-    bio.name = "name.png"
-    template.save(bio, "PNG")
+    bio.name = "preview.jpg"
+    img.save(bio, "JPEG", quality=90, optimize=True)
     bio.seek(0)
-    file = BufferedInputFile(bio.getvalue(), filename="name.png")
-    return file
+    return BufferedInputFile(bio.getvalue(), filename="preview.jpg")
 
 
 def image_to_json(image):
@@ -188,3 +293,5 @@ def print_remove_bg(image):
 
 # mask = calculate_outline("cup_front")
 # mask.save(f"templates/masks/mask_cup_front.png", "PNG")
+
+# generate_masks_for_clothes()

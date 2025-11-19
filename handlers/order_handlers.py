@@ -10,7 +10,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, InputMediaPhoto, InlineKeyboardButton, Message
+from aiogram.types import CallbackQuery, InputMediaPhoto, InlineKeyboardButton, Message, FSInputFile
 from aiogram.utils.deep_linking import create_start_link
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
@@ -18,11 +18,13 @@ import keyboards.order_keyboards
 from config import ADMIN_ID
 from database.db import Database
 from image_processing import *
+from image_processing import _resolve_template_path
 from keyboards.confirmation_keyboards import *
 from keyboards.order_keyboards import *
 from keyboards.print_processing_keyboards import *
 from services.designs import find_design, get_design_preview, list_ready_designs
 from services.pricing import DEFAULT_PRICING, build_price_message, calculate_order_price
+from services.stickers import list_stickers
 
 router = Router()
 storage = Database()
@@ -74,7 +76,7 @@ zone_schemes = {
     ],
 }
 
-sticker_catalog = [
+sticker_catalog = list_stickers() or [
     ("🌸 Цветочек", "flower"),
     ("🦴 Косточка", "bone"),
     ("💛 Сердце", "heart"),
@@ -108,9 +110,11 @@ def _design_keyboard(mode: str, index: int, design_id: str) -> InlineKeyboardBui
         builder.add(InlineKeyboardButton(text="⬅️", callback_data=f"{mode}_show_{prev_index}"))
         builder.add(InlineKeyboardButton(text="➡️", callback_data=f"{mode}_show_{next_index}"))
         builder.adjust(2)
-    action_text = "Хочу такой!" if mode == "example" else "Выбрать этот дизайн"
-    action_callback = f"{mode}_pick_{design_id}"
-    builder.row(InlineKeyboardButton(text=action_text, callback_data=action_callback))
+    # Отключаем кнопку «Хочу такой!» во вкладке макетов (example)
+    if mode != "example":
+        action_text = "Выбрать этот дизайн"
+        action_callback = f"{mode}_pick_{design_id}"
+        builder.row(InlineKeyboardButton(text=action_text, callback_data=action_callback))
     back_callback = "back_to_main" if mode == "example" else "design_cancel"
     back_text = "🔙 Назад к выбору" if mode == "example" else "Назад"
     builder.row(InlineKeyboardButton(text=back_text, callback_data=back_callback))
@@ -179,7 +183,7 @@ async def choose_customization(callback: CallbackQuery, state: FSMContext):
         text=f"Выбери вариант кастомизации для зоны «{zone_title}»:"
     )
     await callback.message.edit_reply_markup(
-        reply_markup=make_customization_keyboard().as_markup()
+        reply_markup=make_customization_keyboard(show_ready_design=designs_available()).as_markup()
     )
     await state.set_state(Order.customization)
 
@@ -317,9 +321,17 @@ async def start_with_link(message: Message, command: CommandObject, state: FSMCo
     if args.startswith("ref-"):
         user = storage.get_user_by_tg(message.from_user.id)
         if user:
-            activated = storage.register_referral_hit(args, user["id"])
+            activated, owner_tg_id = storage.register_referral_hit(args, user["id"])
             if activated:
-                await message.answer("Ура! По ссылке друга зашёл новый пользователь — скидка готовится 💛")
+                # Notify the owner (who shared)
+                if owner_tg_id:
+                    try:
+                        await message.bot.send_message(
+                            owner_tg_id,
+                            "Ура! По твоей ссылке пришёл новый пользователь — ты получил(а) скидку −3%!"
+                        )
+                    except Exception:
+                        pass  # Owner might have blocked the bot
         await cmd_start(message, state)
         return
     if args not in order_types.values():
@@ -360,15 +372,13 @@ async def show_brand_info(callback: CallbackQuery):
 @router.callback_query(F.data == "show_examples")
 async def show_examples(callback: CallbackQuery):
     if not designs_available():
-        await callback.message.edit_text(
-            text="Галерея готовых дизайнов скоро появится, а пока можно сразу выбрать изделие 👇"
-        )
+        await callback.message.edit_text(text="Галерея готовых дизайнов скоро появится, а пока можно сразу выбрать изделие 👇")
         await callback.message.edit_reply_markup(reply_markup=make_back_to_main_keyboard().as_markup())
         return
-    await callback.message.edit_text(
-        text="Вот несколько наших принтов-шаблонов. Листай стрелками и жми «Хочу такой!» 👇"
-    )
-    await callback.message.edit_reply_markup(reply_markup=make_back_to_main_keyboard().as_markup())
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
     await send_design_card(callback.message, 0, "example")
 
 
@@ -425,7 +435,7 @@ async def design_cancel(callback: CallbackQuery, state: FSMContext):
     await callback.message.delete()
     await callback.message.answer(
         "Выбери вариант кастомизации:",
-        reply_markup=make_customization_keyboard().as_markup()
+        reply_markup=make_customization_keyboard(show_ready_design=designs_available()).as_markup()
     )
     await state.set_state(Order.customization)
 
@@ -452,7 +462,11 @@ async def design_pick(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "back_to_main")
 async def back_to_main(callback: CallbackQuery):
-    await callback.message.edit_text(
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    await callback.message.answer(
         text=("Привет! Я — AIVADOG-бот! 🐾\n\n"
               "Добро пожаловать в AIVADOG — место, где твой питомец становится частью твоего стиля 💛\n\n"
               "Здесь ты можешь:\n\n"
@@ -460,9 +474,9 @@ async def back_to_main(callback: CallbackQuery):
               "• загрузить фото своей собачки 🐶,\n\n"
               "• добавить фирменные принты и стикеры,\n\n"
               "• увидеть готовый предпросмотр перед заказом!\n\n"
-              "С чего начнём?👇")
+              "С чего начнём?👇"),
+        reply_markup=make_main_menu_keyboard().as_markup()
     )
-    await callback.message.edit_reply_markup(reply_markup=make_main_menu_keyboard().as_markup())
 
 
 @router.callback_query(F.data.in_(set(order_types.values())))
@@ -514,6 +528,7 @@ async def getting_image(message: Message, state: FSMContext):
             data = await state.get_data()
             item = data["order_type"]
             color = data.get("color")
+            customization = data.get("customization", "photo")
             with Image.open(document) as image:
                 image.save(f"prints/{user_id}.png", "PNG")
                 template_width, template_height = get_template_bounds(item)
@@ -526,8 +541,10 @@ async def getting_image(message: Message, state: FSMContext):
                 file = image_to_bytes(template)
 
             await message.answer_photo(file, reply_markup=confirm_or_setting_keyboard().as_markup())
-            await message.answer("Фото принято ✅\nКак зовут твоего хвостика?", disable_notification=True)
-            await state.set_state(Order.pet_name)
+            # Для варианта "фото" или "стикеры" спрашиваем имя питомца сразу после загрузки
+            if customization in ("photo", "stickers") and not data.get("pet_name"):
+                await message.answer("Фото принято ✅\nКак зовут твоего хвостика?")
+                await state.set_state(Order.pet_name)
         else:
             await message.answer(
                 text="Формат документа не поддерживается!"
@@ -552,11 +569,56 @@ async def _start_sticker_flow(target, state: FSMContext):
     await state.set_state(Order.sticker_zone)
 
 
+async def _show_order_summary(message: Message, state: FSMContext):
+    """Показывает итоговую информацию о заказе после confirm"""
+    data = await state.get_data()
+    item = data.get("order_type")
+    size_order = data.get("order_size")
+    order_label = next((label for label, code in order_types.items() if code == item), "Изделие")
+    zone = zone_label(data.get("order_zone", "chest"))
+    stickers_codes = data.get("stickers", [])
+    titles_map = {code: text for text, code in sticker_catalog}
+    stickers_text = ", ".join(titles_map.get(code, code) for code in stickers_codes) if stickers_codes else "Без стикеров"
+    customization_code = data.get("customization", "photo")
+    customization_text = {
+        "ready": "Готовый дизайн AIVADOG",
+        "photo": "Фото питомца",
+        "stickers": "Фото + стикеры",
+    }.get(customization_code, "Фото питомца")
+    pet_name = data.get("pet_name", "—")
+    
+    order_id = data.get("order_id")
+    order_number = data.get("order_number")
+    
+    summary = (
+        f"Заказ #{order_number or order_id}\n"
+        f"Изделие: {order_label}\n"
+        f"Размер: {size_order.upper()}\n"
+        f"Зона нанесения: {zone}\n"
+        f"Кастомизация: {customization_text}\n"
+        f"Имя питомца: {pet_name}\n"
+    )
+    if data.get("selected_design_title"):
+        summary += f"Дизайн: {data['selected_design_title']}\n"
+    summary += (
+        f"Стикеры: {stickers_text}\n\n"
+        "Всё нравится?"
+    )
+    await message.answer(summary, reply_markup=final_preview_keyboard().as_markup())
+
+
 @router.message(Order.pet_name)
 async def pet_name_received(message: Message, state: FSMContext):
     pet_name = message.text.strip()
     await state.update_data({"pet_name": pet_name})
     data = await state.get_data()
+    customization = data.get("customization", "photo")
+    
+    # Если это был вызов после confirm для готового дизайна, показываем summary
+    if customization == "ready" and data.get("front_id"):
+        await _show_order_summary(message, state)
+        return
+    
     if data.get("stickers_planned"):
         await _start_sticker_flow(message, state)
     else:
@@ -748,6 +810,7 @@ async def move_print(callback: CallbackQuery, state: FSMContext):
     else:
         image = Image.open(f"prints/{user_id}.png")
     item = data["order_type"]
+    template_width, template_height = get_template_bounds(item)
     color = data.get("color")
     print_pos = data["pos"]
     angle = data["angle"]
@@ -838,6 +901,7 @@ async def change_side(callback: CallbackQuery, state: FSMContext):
     side = data["side"]
 
     item = data["order_type"]
+    template_width, template_height = get_template_bounds(item)
     color = data.get("color")
     print_pos = data["pos"]
     angle = data["angle"]
@@ -933,6 +997,12 @@ async def confirm_print(callback: CallbackQuery, state: FSMContext):
     front_id = media_group[0].photo[-1].file_id
     back_id = media_group[1].photo[-1].file_id
     await state.update_data({"album_id": media_group[0].message_id, "front_id": front_id, "back_id": back_id})
+    # После нажатия «Продолжить» спрашиваем имя питомца (если ещё не задано)
+    # Для варианта "ready" (готовый дизайн) спрашиваем имя здесь
+    if not data.get("pet_name") and data.get("customization") == "ready":
+        await callback.message.answer("Фото принято ✅\nКак зовут твоего хвостика?", disable_notification=True)
+        await state.set_state(Order.pet_name)
+        return
     order_label = next((label for label, code in order_types.items() if code == item), "Изделие")
     zone = zone_label(data.get("order_zone", "chest"))
     stickers_codes = data.get("stickers", [])
@@ -985,22 +1055,10 @@ async def confirm_print(callback: CallbackQuery, state: FSMContext):
         if notes:
             storage.update_order_notes(order_id, **notes)
     storage.attach_preview(order_id, front_id, back_id)
+    await state.update_data({"order_id": order_id, "order_number": order_number})
 
-    summary = (
-        f"Заказ #{order_number or order_id}\n"
-        f"Изделие: {order_label}\n"
-        f"Размер: {size_order.upper()}\n"
-        f"Зона нанесения: {zone}\n"
-        f"Кастомизация: {customization_text}\n"
-        f"Имя питомца: {pet_name}\n"
-    )
-    if data.get("selected_design_title"):
-        summary += f"Дизайн: {data['selected_design_title']}\n"
-    summary += (
-        f"Стикеры: {stickers_text}\n\n"
-        "Всё нравится?"
-    )
-    await callback.message.answer(summary, reply_markup=final_preview_keyboard().as_markup())
+    # Показываем итоговый summary через общую функцию
+    await _show_order_summary(callback.message, state)
 
 
 @router.callback_query(F.data == "preview_ok")
@@ -1033,13 +1091,40 @@ async def preview_ok(callback: CallbackQuery, state: FSMContext):
 async def preview_designer(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     order_number = data.get("order_number", "—")
-    await callback.bot.send_message(
-        ADMIN_ID,
+    
+    text = (
         f"Новая заявка на доработку #{order_number}\n"
         f"Изделие: {next((label for label, code in order_types.items() if code == data.get('order_type')), '—')}\n"
         f"Размер: {data.get('order_size', '').upper()}\n"
         f"Имя питомца: {data.get('pet_name', '—')}"
     )
+    
+    front_id = data.get("front_id")
+    back_id = data.get("back_id")
+    user_id = callback.from_user.id
+    user_photo_path = f"prints/{user_id}.png"
+    
+    media = []
+    if front_id:
+        media.append(InputMediaPhoto(media=front_id, caption="Макет (перед)"))
+    if back_id:
+        media.append(InputMediaPhoto(media=back_id, caption="Макет (зад)"))
+    
+    if os.path.exists(user_photo_path):
+        # For local file we use FSInputFile
+        user_photo = FSInputFile(user_photo_path)
+        media.append(InputMediaPhoto(media=user_photo, caption="Фото клиента"))
+        
+    if media:
+        # Set caption only for first element to avoid duplicates if we wanted one caption for group, 
+        # but here we used individual captions. Telegram might only show the first one or combine.
+        # To be safe, let's put the main text in a separate message or attached to the first photo.
+        # Let's send text first.
+        await callback.bot.send_message(ADMIN_ID, text)
+        await callback.bot.send_media_group(ADMIN_ID, media)
+    else:
+        await callback.bot.send_message(ADMIN_ID, text)
+
     await callback.answer("Сообщение дизайнеру отправлено 💬", show_alert=True)
 
 
