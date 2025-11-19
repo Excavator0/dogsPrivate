@@ -24,7 +24,7 @@ from keyboards.order_keyboards import *
 from keyboards.print_processing_keyboards import *
 from services.designs import find_design, get_design_preview, list_ready_designs
 from services.pricing import DEFAULT_PRICING, build_price_message, calculate_order_price
-from services.stickers import list_stickers
+from services.stickers import list_stickers, list_sticker_categories, list_stickers_in_category, get_sticker_path
 
 router = Router()
 storage = Database()
@@ -47,28 +47,18 @@ zone_schemes = {
     "shirt": [
         ("Грудь", "chest"),
         ("Спина", "back"),
-        ("Левый рукав", "sleeve_left"),
-        ("Правый рукав", "sleeve_right"),
     ],
     "hoodie": [
         ("Грудь", "chest"),
         ("Спина", "back"),
-        ("Левый рукав", "sleeve_left"),
-        ("Правый рукав", "sleeve_right"),
-        ("Капюшон", "hood"),
     ],
     "sweatshirt": [
         ("Грудь", "chest"),
         ("Спина", "back"),
-        ("Левый рукав", "sleeve_left"),
-        ("Правый рукав", "sleeve_right"),
     ],
     "zip": [
         ("Грудь", "chest"),
         ("Спина", "back"),
-        ("Левый рукав", "sleeve_left"),
-        ("Правый рукав", "sleeve_right"),
-        ("Капюшон", "hood"),
     ],
     "pants": [
         ("Левая штанина", "pant_left"),
@@ -255,6 +245,7 @@ class Order(StatesGroup):
     image_sent = State()
     pet_name = State()
     sticker_zone = State()
+    sticker_category = State()
     sticker_choice = State()
     price = State()
     bg_deleted = State()
@@ -300,6 +291,8 @@ async def cmd_start(message: Message, state: FSMContext):
         "pos": [[-1, -1], [-1, -1]],
         "side": 0,
         "stickers": [],
+        "sticker_items": [],
+        "active_sticker_index": None,
         "preferred_customization": None,
         "selected_design_id": None,
         "selected_design_title": None,
@@ -489,6 +482,8 @@ async def order_size(callback: CallbackQuery, state: FSMContext):
         "pos": [[-1, -1], [-1, -1]],
         "side": 0,
         "stickers": [],
+        "sticker_items": [],
+        "active_sticker_index": None,
         "stickers_planned": False,
         "color": None,
     })
@@ -527,24 +522,30 @@ async def getting_image(message: Message, state: FSMContext):
             document = await message.bot.download(message.document.file_id)
             data = await state.get_data()
             item = data["order_type"]
-            color = data.get("color")
-            customization = data.get("customization", "photo")
             with Image.open(document) as image:
                 image.save(f"prints/{user_id}.png", "PNG")
                 template_width, template_height = get_template_bounds(item)
                 centre_pos = [(template_width - image.size[0]) // 2,
                               (template_height - image.size[1]) // 2]
                 await state.update_data(
-                    {"pos": [centre_pos, [-1, -1]], "size": [image.size, image.size], "angle": [0, 0],
-                     "bg_deleted": [False, False]})
-                template = paste(image, color, centre_pos, item, 0, 0)
-                file = image_to_bytes(template)
+                    {
+                        "pos": [centre_pos, [-1, -1]],
+                        "size": [image.size, image.size],
+                        "angle": [0, 0],
+                        "bg_deleted": [False, False],
+                    }
+                )
 
-            await message.answer_photo(file, reply_markup=confirm_or_setting_keyboard().as_markup())
-            # Для варианта "фото" или "стикеры" спрашиваем имя питомца сразу после загрузки
-            if customization in ("photo", "stickers") and not data.get("pet_name"):
+            # После загрузки изображения сначала спрашиваем кличку питомца,
+            # а уже потом показываем фото с макетом
+            data = await state.get_data()
+            if not data.get("pet_name"):
                 await message.answer("Фото принято ✅\nКак зовут твоего хвостика?")
                 await state.set_state(Order.pet_name)
+            else:
+                # Если кличка уже известна (например, при редактировании заказа),
+                # сразу показываем макет
+                await _send_initial_mockup(message, state)
         else:
             await message.answer(
                 text="Формат документа не поддерживается!"
@@ -556,16 +557,117 @@ async def photo_sent(message: Message):
     await message.answer("Отправьте фото документом, так не потеряется качество изображения")
 
 
+async def _send_initial_mockup(message: Message, state: FSMContext):
+    """Генерирует и отправляет первое фото с макетом после загрузки изображения."""
+    data = await state.get_data()
+    user_id = message.from_user.id
+    item = data["order_type"]
+    color = data.get("color")
+    side = data.get("side", 0)
+    print_pos = data.get("pos") or [[-1, -1], [-1, -1]]
+    angle = data.get("angle") or [0, 0]
+    size = data.get("size") or [[0, 0], [0, 0]]
+    bg_deleted = data.get("bg_deleted") or [False, False]
+
+    if bg_deleted[side]:
+        image = Image.open(f"prints/{user_id}_bg_deleted.png")
+    else:
+        image = Image.open(f"prints/{user_id}.png")
+
+    # Если размеры ещё не были сохранены, используем исходный размер изображения
+    if not size[side] or size[side][0] == 0 or size[side][1] == 0:
+        size[side] = list(image.size)
+
+    image = image.resize(tuple(size[side]), Image.Resampling.BICUBIC)
+    base = paste(image, color, print_pos[side], item, side, angle[side], bg_deleted[side])
+    base = _apply_stickers_overlay(base, data, side)
+    file = image_to_bytes(base)
+    await message.answer_photo(file, reply_markup=confirm_or_setting_keyboard().as_markup())
+
+
+def _apply_stickers_overlay(base_image: Image.Image, data: dict, side: int) -> Image.Image:
+    """
+    Накладывает выбранные стикеры на итоговый макет для нужной стороны.
+    """
+    sticker_items = data.get("sticker_items") or []
+    if not sticker_items:
+        return base_image
+    composed = base_image.copy()
+    width, height = composed.size
+    for idx, item in enumerate(sticker_items):
+        if item.get("side", 0) != side:
+            continue
+        code = item.get("code")
+        path = get_sticker_path(code)
+        if not path or not path.exists():
+            continue
+        try:
+            sticker = Image.open(path).convert("RGBA")
+        except Exception:
+            continue
+        size = item.get("size")
+        angle = int(item.get("angle", 0)) % 360
+        pos = item.get("pos") or [0, 0]
+        if size and size[0] > 0 and size[1] > 0:
+            sticker = sticker.resize(tuple(size), Image.Resampling.BICUBIC)
+        if angle:
+            sticker = sticker.rotate(angle, expand=True)
+        # Пеpестрахуем позицию в пределах шаблона
+        x = max(0, min(pos[0], width - 1))
+        y = max(0, min(pos[1], height - 1))
+        # Накладываем с сохранением альфы
+        composed.paste(sticker, (x, y), sticker)
+    return composed
+
+
+async def _show_mockup_after_stickers(callback: CallbackQuery, state: FSMContext, reply_markup=None):
+    """
+    Восстанавливает макет в том же сообщении после работы со стикерами.
+    Используется, когда пользователь закончил или отменил выбор стикеров.
+    """
+    data = await state.get_data()
+    user_id = callback.from_user.id
+    item = data["order_type"]
+    color = data.get("color")
+    side = data.get("side", 0)
+    print_pos = data.get("pos") or [[-1, -1], [-1, -1]]
+    angle = data.get("angle") or [0, 0]
+    size = data.get("size") or [[0, 0], [0, 0]]
+    bg_deleted = data.get("bg_deleted") or [False, False]
+
+    if bg_deleted[side]:
+        image = Image.open(f"prints/{user_id}_bg_deleted.png")
+    else:
+        image = Image.open(f"prints/{user_id}.png")
+
+    if not size[side] or size[side][0] == 0 or size[side][1] == 0:
+        size[side] = list(image.size)
+
+    image = image.resize(tuple(size[side]), Image.Resampling.BICUBIC)
+    base = paste(image, color, print_pos[side], item, side, angle[side], bg_deleted[side])
+    base = _apply_stickers_overlay(base, data, side)
+    file = image_to_bytes(base)
+    media = InputMediaPhoto(media=file, caption=None)
+    if reply_markup is None:
+        reply_markup = make_settings_keyboard().as_markup()
+    await callback.message.edit_media(media, reply_markup=reply_markup)
+
+
 async def _start_sticker_flow(target, state: FSMContext):
     data = await state.get_data()
     item = data.get("order_type")
     zones = [("К фото", "photo")] + zone_schemes.get(get_base_item(item), zone_schemes["shirt"])
     text = "Выбери зону нанесения стикера:"
     if isinstance(target, Message):
+        # На всякий случай поддерживаем запуск из текстового сообщения
         await target.answer(text, reply_markup=make_sticker_zone_keyboard(zones).as_markup())
     else:
-        await target.message.edit_text(text)
-        await target.message.edit_reply_markup(make_sticker_zone_keyboard(zones).as_markup())
+        # Для callback работаем всегда с одним сообщением:
+        # меняем подпись и клавиатуру у текущего сообщения (с макетом или стикером)
+        await target.message.edit_caption(caption=text)
+        await target.message.edit_reply_markup(
+            reply_markup=make_sticker_zone_keyboard(zones).as_markup()
+        )
     await state.set_state(Order.sticker_zone)
 
 
@@ -618,15 +720,11 @@ async def pet_name_received(message: Message, state: FSMContext):
     if customization == "ready" and data.get("front_id"):
         await _show_order_summary(message, state)
         return
-    
-    if data.get("stickers_planned"):
-        await _start_sticker_flow(message, state)
-    else:
-        await message.answer(
-            "Хочешь добавить фирменные стикеры AIVADOG к фото? 🎨",
-            reply_markup=make_yes_no_keyboard("stickers_yes", "stickers_no").as_markup()
-        )
-        await state.set_state(Order.customization)
+
+    # После того как узнали кличку, показываем первое фото с макетом
+    await _send_initial_mockup(message, state)
+
+    # Дальше пользователь сам может открыть настройки и перейти к стикерам при необходимости
 
 
 @router.callback_query(F.data == "stickers_yes")
@@ -645,23 +743,354 @@ async def stickers_no(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(Order.sticker_zone, F.data.startswith("sticker_zone_"))
 async def sticker_zone_selected(callback: CallbackQuery, state: FSMContext):
     zone = callback.data.replace("sticker_zone_", "")
-    await state.update_data({"sticker_zone": zone, "stickers": []})
-    await callback.message.edit_text("Выбери стикеры, которые хочешь добавить 🐾")
-    await callback.message.edit_reply_markup(make_sticker_keyboard(sticker_catalog).as_markup())
+    await state.update_data({"sticker_zone": zone, "stickers": [], "sticker_items": [], "active_sticker_index": None})
+
+    categories = list_sticker_categories()
+    if not categories:
+        await callback.answer("Стикеры скоро появятся 💛", show_alert=True)
+        await _start_sticker_flow(callback, state)
+        return
+
+    # Меняем текст и клавиатуру в текущем сообщении (остается прежнее изображение)
+    await callback.message.edit_caption("Выбери категорию стикеров 🐾")
+    await callback.message.edit_reply_markup(
+        reply_markup=make_sticker_categories_keyboard(categories).as_markup()
+    )
+    await state.set_state(Order.sticker_category)
+
+
+@router.callback_query(Order.sticker_category, F.data.startswith("sticker_cat_"))
+async def sticker_category_selected(callback: CallbackQuery, state: FSMContext):
+    """
+    Пользователь выбрал категорию стикеров — показываем первый стикер в виде карусели.
+    """
+    category_code = callback.data.replace("sticker_cat_", "")
+    stickers = list_stickers_in_category(category_code)
+    if not stickers:
+        await callback.answer("В этой категории пока нет стикеров", show_alert=True)
+        return
+
+    codes = [code for _, code in stickers]
+    await state.update_data(
+        {
+            "current_sticker_category": category_code,
+            "current_sticker_codes": codes,
+            "current_sticker_index": 0,
+        }
+    )
+
+    first_code = codes[0]
+    path = get_sticker_path(first_code)
+    if not path or not path.exists():
+        await callback.answer("Не удалось загрузить стикер", show_alert=True)
+        return
+
+    file = FSInputFile(path)
+    media = InputMediaPhoto(media=file, caption="Листай стикеры и нажми «Добавить», чтобы выбрать 🐾")
+    # Показываем первый стикер в том же сообщении, где был макет
+    await callback.message.edit_media(
+        media, reply_markup=make_sticker_view_keyboard(0, len(codes)).as_markup()
+    )
+    await callback.answer()
     await state.set_state(Order.sticker_choice)
 
 
-@router.callback_query(Order.sticker_choice, F.data.startswith("sticker_"))
-async def sticker_added(callback: CallbackQuery, state: FSMContext):
-    sticker_code = callback.data.replace("sticker_", "")
+@router.callback_query(
+    Order.sticker_choice, F.data.in_({"sticker_prev", "sticker_next", "sticker_add"})
+)
+async def sticker_browse(callback: CallbackQuery, state: FSMContext):
+    """
+    Навигация по стикерам внутри выбранной категории и добавление текущего стикера.
+    """
     data = await state.get_data()
-    stickers = data.get("stickers", [])
-    if sticker_code not in stickers:
-        stickers.append(sticker_code)
-        await state.update_data({"stickers": stickers})
-        await callback.answer("Добавили стикер", show_alert=False)
+    codes = data.get("current_sticker_codes") or []
+    if not codes:
+        await callback.answer("Сначала выбери категорию стикеров", show_alert=True)
+        return
+
+    index = int(data.get("current_sticker_index", 0)) % len(codes)
+
+    if callback.data == "sticker_add":
+        stickers = data.get("stickers", [])
+        sticker_items = data.get("sticker_items") or []
+        current_code = codes[index]
+        if len(sticker_items) >= 10:
+            await callback.answer("Можно добавить не больше 10 стикеров", show_alert=True)
+            return
+        # Добавляем код для summary
+        stickers.append(current_code)
+        # Создаём инстанс стикера со значениями по умолчанию
+        item_code = data.get("order_type")
+        template_width, template_height = get_template_bounds(item_code)
+        # Рассчитываем базовый размер — 25% от ширины макета
+        path = get_sticker_path(current_code)
+        try:
+            with Image.open(path) as st_img:
+                w, h = st_img.size
+        except Exception:
+            w, h = (400, 400)
+        max_w = max(50, template_width // 4)
+        scale = min(max_w / float(w), 1.0)
+        size_w = max(50, int(w * scale))
+        size_h = max(50, int(h * scale))
+        # Центрируем
+        pos = [(template_width - size_w) // 2, (template_height - size_h) // 2]
+        side = data.get("side", 0)
+        sticker_items.append({
+            "code": current_code,
+            "pos": pos,
+            "size": [size_w, size_h],
+            "angle": 0,
+            "side": side,
+        })
+        active_index = len(sticker_items) - 1
+        await state.update_data({"stickers": stickers, "sticker_items": sticker_items, "active_sticker_index": active_index})
+        # Переходим в меню редактирования стикеров в том же сообщении
+        from keyboards.print_processing_keyboards import make_stickers_manage_keyboard
+        await _show_mockup_after_stickers(callback, state, reply_markup=make_stickers_manage_keyboard(active_index, len(sticker_items)).as_markup())
+        await callback.answer("Стикер добавлен ✅", show_alert=False)
+        return
+
+    # Навигация влево/вправо
+    if callback.data == "sticker_prev":
+        index = (index - 1) % len(codes)
+    elif callback.data == "sticker_next":
+        index = (index + 1) % len(codes)
+
+    await state.update_data({"current_sticker_index": index})
+    code = codes[index]
+    path = get_sticker_path(code)
+    if not path or not path.exists():
+        await callback.answer("Не удалось загрузить стикер", show_alert=True)
+        return
+
+    file = FSInputFile(path)
+    media = InputMediaPhoto(
+        media=file,
+        caption="Листай стикеры и нажми «Добавить», чтобы выбрать 🐾",
+    )
+    try:
+        await callback.message.edit_media(
+            media, reply_markup=make_sticker_view_keyboard(index, len(codes)).as_markup()
+        )
+    except TelegramBadRequest:
+        # На всякий случай, если Telegram не позволяет изменить медиа
+        await callback.answer()
+
+
+# === Редактирование добавленных стикеров ===
+@router.callback_query(F.data == "st_manage")
+async def stickers_manage(callback: CallbackQuery, state: FSMContext):
+    from keyboards.print_processing_keyboards import make_stickers_manage_keyboard
+    data = await state.get_data()
+    items = data.get("sticker_items") or []
+    active = data.get("active_sticker_index")
+    await _show_mockup_after_stickers(callback, state, reply_markup=make_stickers_manage_keyboard(active, len(items)).as_markup())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "st_select")
+async def stickers_select(callback: CallbackQuery, state: FSMContext):
+    from keyboards.print_processing_keyboards import make_stickers_select_keyboard
+    data = await state.get_data()
+    items = data.get("sticker_items") or []
+    await callback.message.edit_caption("Выбери стикер для редактирования")
+    await callback.message.edit_reply_markup(make_stickers_select_keyboard(len(items)).as_markup())
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("st_pick_"))
+async def sticker_pick(callback: CallbackQuery, state: FSMContext):
+    from keyboards.print_processing_keyboards import make_stickers_manage_keyboard
+    index = int(callback.data.replace("st_pick_", ""))
+    data = await state.get_data()
+    items = data.get("sticker_items") or []
+    if not (0 <= index < len(items)):
+        await callback.answer()
+        return
+    await state.update_data({"active_sticker_index": index})
+    await _show_mockup_after_stickers(callback, state, reply_markup=make_stickers_manage_keyboard(index, len(items)).as_markup())
+    await callback.answer("Стикер выбран", show_alert=False)
+
+
+@router.callback_query(F.data == "st_move")
+async def sticker_move_main(callback: CallbackQuery):
+    from keyboards.print_processing_keyboards import make_sticker_move_keyboard
+    await callback.message.edit_reply_markup(make_sticker_move_keyboard().as_markup())
+    await callback.answer()
+
+
+@router.callback_query(F.data.in_({"st_move_up", "st_move_down", "st_move_left", "st_move_right", "st_move_centre"}))
+async def sticker_move(callback: CallbackQuery, state: FSMContext):
+    from keyboards.print_processing_keyboards import make_sticker_move_keyboard
+    data = await state.get_data()
+    items = data.get("sticker_items") or []
+    active = data.get("active_sticker_index")
+    if active is None or not (0 <= active < len(items)):
+        await callback.answer("Сначала выбери стикер", show_alert=True)
+        return
+    item_code = data.get("order_type")
+    template_width, template_height = get_template_bounds(item_code)
+    sticker = items[active]
+    pos = sticker.get("pos") or [0, 0]
+    size = sticker.get("size") or [100, 100]
+    angle = int(sticker.get("angle", 0))
+    changed = False
+    if callback.data == "st_move_right":
+        if (pos[0] + size_step) < template_width:
+            pos[0] += size_step
+            changed = True
+    elif callback.data == "st_move_left":
+        if (pos[0] - size_step) > 0:
+            pos[0] -= size_step
+            changed = True
+    elif callback.data == "st_move_up":
+        if (pos[1] - size_step) > 0:
+            pos[1] -= size_step
+            changed = True
+    elif callback.data == "st_move_down":
+        if (pos[1] + size_step) < template_height:
+            pos[1] += size_step
+            changed = True
+    elif callback.data == "st_move_centre":
+        # учитываем поворот на 90/270
+        rotations = angle % 180
+        if rotations == 0:
+            pos[0] = (template_width - size[0]) // 2
+            pos[1] = (template_height - size[1]) // 2
+        else:
+            pos[0] = (template_width - size[1]) // 2
+            pos[1] = (template_height - size[0]) // 2
+        changed = True
+    if changed:
+        sticker["pos"] = pos
+        items[active] = sticker
+        await state.update_data({"sticker_items": items})
+        await _show_mockup_after_stickers(callback, state, reply_markup=make_sticker_move_keyboard().as_markup())
     else:
-        await callback.answer("Этот стикер уже выбран", show_alert=True)
+        await callback.answer()
+
+
+@router.callback_query(F.data == "st_size")
+async def sticker_size_main(callback: CallbackQuery):
+    from keyboards.print_processing_keyboards import make_sticker_size_keyboard
+    await callback.message.edit_reply_markup(make_sticker_size_keyboard().as_markup())
+    await callback.answer()
+
+
+@router.callback_query(F.data.in_({"st_increase_size", "st_decrease_size"}))
+async def sticker_size(callback: CallbackQuery, state: FSMContext):
+    from keyboards.print_processing_keyboards import make_sticker_size_keyboard
+    data = await state.get_data()
+    items = data.get("sticker_items") or []
+    active = data.get("active_sticker_index")
+    if active is None or not (0 <= active < len(items)):
+        await callback.answer("Сначала выбери стикер", show_alert=True)
+        return
+    item_code = data.get("order_type")
+    template_width, template_height = get_template_bounds(item_code)
+    sticker = items[active]
+    size = sticker.get("size") or [100, 100]
+    x_size, y_size = size
+    changed = False
+    if callback.data == "st_decrease_size":
+        decrease_k = 5 / 6
+        if (x_size * decrease_k > size_step) and (y_size * decrease_k > size_step):
+            size = [int(x_size * decrease_k), int(y_size * decrease_k)]
+            changed = True
+        else:
+            await callback.answer("Достигнут минимум размера стикера")
+    else:
+        increase_k = 1.2
+        if (x_size * increase_k < template_width) and (y_size * increase_k < template_height):
+            size = [int(x_size * increase_k), int(y_size * increase_k)]
+            changed = True
+        else:
+            await callback.answer("Достигнут максимум размера стикера")
+    if changed:
+        sticker["size"] = size
+        items[active] = sticker
+        await state.update_data({"sticker_items": items})
+        await _show_mockup_after_stickers(callback, state, reply_markup=make_sticker_size_keyboard().as_markup())
+    else:
+        await callback.answer()
+
+
+@router.callback_query(F.data == "st_rotate")
+async def sticker_rotate_main(callback: CallbackQuery):
+    from keyboards.print_processing_keyboards import make_sticker_rotate_keyboard
+    await callback.message.edit_reply_markup(make_sticker_rotate_keyboard().as_markup())
+    await callback.answer()
+
+
+@router.callback_query(F.data.in_({"st_rotate_left", "st_rotate_right"}))
+async def sticker_rotate(callback: CallbackQuery, state: FSMContext):
+    from keyboards.print_processing_keyboards import make_sticker_rotate_keyboard
+    data = await state.get_data()
+    items = data.get("sticker_items") or []
+    active = data.get("active_sticker_index")
+    if active is None or not (0 <= active < len(items)):
+        await callback.answer("Сначала выбери стикер", show_alert=True)
+        return
+    sticker = items[active]
+    angle = int(sticker.get("angle", 0))
+    if callback.data == "st_rotate_right":
+        angle += 270
+    else:
+        angle += 90
+    sticker["angle"] = angle
+    items[active] = sticker
+    await state.update_data({"sticker_items": items})
+    await _show_mockup_after_stickers(callback, state, reply_markup=make_sticker_rotate_keyboard().as_markup())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "st_change_side")
+async def sticker_change_side(callback: CallbackQuery, state: FSMContext):
+    from keyboards.print_processing_keyboards import make_stickers_manage_keyboard
+    data = await state.get_data()
+    items = data.get("sticker_items") or []
+    active = data.get("active_sticker_index")
+    if active is None or not (0 <= active < len(items)):
+        await callback.answer("Сначала выбери стикер", show_alert=True)
+        return
+    sticker = items[active]
+    # меняем сторону и сбрасываем позицию/угол, центруем
+    new_side = 0 if sticker.get("side", 0) == 1 else 1
+    item_code = data.get("order_type")
+    template_width, template_height = get_template_bounds(item_code)
+    w, h = sticker.get("size") or [100, 100]
+    pos = [(template_width - w) // 2, (template_height - h) // 2]
+    sticker.update({"side": new_side, "pos": pos, "angle": 0})
+    items[active] = sticker
+    await state.update_data({"sticker_items": items})
+    await _show_mockup_after_stickers(callback, state, reply_markup=make_stickers_manage_keyboard(active, len(items)).as_markup())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "st_delete")
+async def sticker_delete(callback: CallbackQuery, state: FSMContext):
+    from keyboards.print_processing_keyboards import make_stickers_manage_keyboard
+    data = await state.get_data()
+    items = data.get("sticker_items") or []
+    active = data.get("active_sticker_index")
+    if active is None or not (0 <= active < len(items)):
+        await callback.answer("Сначала выбери стикер", show_alert=True)
+        return
+    # Удаляем инстанс и одну запись кода из summary списков (первое вхождение)
+    sticker_code = items[active].get("code")
+    items.pop(active)
+    codes = data.get("stickers") or []
+    if sticker_code in codes:
+        codes.remove(sticker_code)
+    new_active = None if not items else min(active, len(items) - 1)
+    await state.update_data({"sticker_items": items, "stickers": codes, "active_sticker_index": new_active})
+    if not items:
+        await _show_mockup_after_stickers(callback, state, reply_markup=make_settings_keyboard().as_markup())
+        await callback.answer("Стикер удалён", show_alert=False)
+        return
+    await _show_mockup_after_stickers(callback, state, reply_markup=make_stickers_manage_keyboard(new_active, len(items)).as_markup())
+    await callback.answer("Стикер удалён", show_alert=False)
 
 
 @router.callback_query(F.data == "stickers_done")
@@ -671,20 +1100,27 @@ async def stickers_done(callback: CallbackQuery, state: FSMContext):
     if not stickers:
         await callback.answer("Выбери хотя бы один стикер", show_alert=True)
         return
-    await callback.message.answer("Супер! Проверь макет и нажми «Продолжить», когда всё понравится ✅")
-    await state.set_state(Order.customization)
+    # После выбора стикеров возвращаемся к макету в этом же сообщении
+    from keyboards.print_processing_keyboards import make_stickers_manage_keyboard
+    items = data.get("sticker_items") or []
+    active = data.get("active_sticker_index")
+    await _show_mockup_after_stickers(callback, state, reply_markup=make_stickers_manage_keyboard(active, len(items)).as_markup())
+    await callback.answer("Стикеры добавлены. Проверь макет и продолжай настройки ✅", show_alert=False)
+    # Состояние можно не менять жёстко — пользователь продолжает работу через настройки / confirm
 
 
 @router.callback_query(F.data == "stickers_back")
 async def stickers_back(callback: CallbackQuery, state: FSMContext):
+    # Возвращаемся к выбору зоны в этом же сообщении
     await _start_sticker_flow(callback, state)
 
 
 @router.callback_query(F.data == "stickers_cancel")
 async def stickers_cancel(callback: CallbackQuery, state: FSMContext):
-    await state.update_data({"stickers": [], "stickers_planned": False})
-    await callback.message.answer("Вернулись к макету. Нажми «Продолжить», когда будешь готов.")
-    await state.set_state(Order.customization)
+    await state.update_data({"stickers": [], "sticker_items": [], "active_sticker_index": None, "stickers_planned": False})
+    # Отмена — возвращаем макет и настройки в том же сообщении
+    await _show_mockup_after_stickers(callback, state)
+    await callback.answer("Вернулись к макету. Стикеры очищены.", show_alert=False)
 
 
 @router.callback_query(F.data == "settings_back")
@@ -718,8 +1154,10 @@ async def remove_print_bg(callback: CallbackQuery, state: FSMContext):
         image = image.resize(tuple(size[side]), Image.Resampling.BICUBIC)
         image = print_remove_bg(image)
         image.save(f"prints/{user_id}_bg_deleted.png", "PNG")
-        template = paste(image, color, print_pos[side], item, side, angle[side], True)
-        file = image_to_bytes(template)
+        base = paste(image, color, print_pos[side], item, side, angle[side], True)
+        data = await state.get_data()
+        base = _apply_stickers_overlay(base, data, side)
+        file = image_to_bytes(base)
         file = InputMediaPhoto(media=file)
         await callback.message.edit_media(file, reply_markup=make_remove_bg_keyboard().as_markup())
 
@@ -739,8 +1177,10 @@ async def restore_print_bg(callback: CallbackQuery, state: FSMContext):
     bg_deleted[side] = False
     await state.update_data({"bg_deleted": bg_deleted})
     image = image.resize(tuple(size[side]), Image.Resampling.BICUBIC)
-    template = paste(image, color, print_pos[side], item, side, angle[side], False)
-    file = image_to_bytes(template)
+    base = paste(image, color, print_pos[side], item, side, angle[side], False)
+    data = await state.get_data()
+    base = _apply_stickers_overlay(base, data, side)
+    file = image_to_bytes(base)
     file = InputMediaPhoto(media=file)
     await callback.message.edit_media(file, reply_markup=make_settings_keyboard().as_markup())
 
@@ -787,8 +1227,10 @@ async def print_size(callback: CallbackQuery, state: FSMContext):
     if size_changed:
         size[side] = new_size
         image = image.resize(tuple(size[side]), Image.Resampling.BICUBIC)
-        template = paste(image, color, print_pos[side], item, side, angle[side], bg_deleted[side])
-        file = image_to_bytes(template)
+        base = paste(image, color, print_pos[side], item, side, angle[side], bg_deleted[side])
+        data = await state.get_data()
+        base = _apply_stickers_overlay(base, data, side)
+        file = image_to_bytes(base)
         await state.update_data({"size": size})
         file = InputMediaPhoto(media=file)
         await callback.message.edit_media(file, reply_markup=make_print_size_keyboard().as_markup())
@@ -851,8 +1293,10 @@ async def move_print(callback: CallbackQuery, state: FSMContext):
         pos_changed = True
     if pos_changed:
         image = image.resize(tuple(size[side]), Image.Resampling.BICUBIC)
-        template = paste(image, color, print_pos[side], item, side, angle[side], bg_deleted[side])
-        file = image_to_bytes(template)
+        base = paste(image, color, print_pos[side], item, side, angle[side], bg_deleted[side])
+        data = await state.get_data()
+        base = _apply_stickers_overlay(base, data, side)
+        file = image_to_bytes(base)
         await state.update_data({"pos": print_pos})
         file = InputMediaPhoto(media=file)
         try:
@@ -886,8 +1330,10 @@ async def rotate_print(callback: CallbackQuery, state: FSMContext):
     else:
         angle[side] = angle[side] + 90
     image = image.resize(tuple(size[side]), Image.Resampling.BICUBIC)
-    template = paste(image, color, print_pos[side], item, side, angle[side], bg_deleted[side])
-    file = image_to_bytes(template)
+    base = paste(image, color, print_pos[side], item, side, angle[side], bg_deleted[side])
+    data = await state.get_data()
+    base = _apply_stickers_overlay(base, data, side)
+    file = image_to_bytes(base)
     await state.update_data({"angle": angle})
     file = InputMediaPhoto(media=file)
     await callback.message.edit_media(file, reply_markup=make_rotate_keyboard().as_markup())
@@ -921,8 +1367,10 @@ async def change_side(callback: CallbackQuery, state: FSMContext):
         angle[side] = 0
     elif print_pos[side] != "deleted":
         image = image.resize(tuple(size[side]), Image.Resampling.BICUBIC)
-    template = paste(image, color, print_pos[side], item, side, angle[side], bg_deleted[side])
-    file = image_to_bytes(template)
+    base = paste(image, color, print_pos[side], item, side, angle[side], bg_deleted[side])
+    data = await state.get_data()
+    base = _apply_stickers_overlay(base, data, side)
+    file = image_to_bytes(base)
     file = InputMediaPhoto(media=file)
     await state.update_data({"pos": print_pos, "side": side, "bg_deleted": bg_deleted, "angle": angle, "size": size})
     await callback.message.edit_media(file, reply_markup=make_settings_keyboard().as_markup())
@@ -941,8 +1389,10 @@ async def delete_print(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Нечего удалять!")
     else:
         print_pos[side] = "deleted"
-        template = paste(None, color, print_pos[side], item, side, angle[side], bg_deleted[side])
-        file = image_to_bytes(template)
+        base = paste(None, color, print_pos[side], item, side, angle[side], bg_deleted[side])
+        data = await state.get_data()
+        base = _apply_stickers_overlay(base, data, side)
+        file = image_to_bytes(base)
         file = InputMediaPhoto(media=file)
         await state.update_data({"pos": print_pos})
         await callback.message.edit_media(file, reply_markup=make_settings_keyboard().as_markup())
@@ -973,6 +1423,8 @@ async def confirm_print(callback: CallbackQuery, state: FSMContext):
         f"prints/{user_id}.png")
     image1 = base_image.resize(tuple(size[0]), Image.Resampling.BICUBIC)
     front = paste(image1, color, print_pos[0], item, 0, angle[0], bg_deleted[0])
+    data_for_overlay = await state.get_data()
+    front = _apply_stickers_overlay(front, data_for_overlay, 0)
     file1 = InputMediaPhoto(media=image_to_bytes(front))
 
     if isinstance(print_pos[1], list) and print_pos[1][0] == -1:
@@ -982,6 +1434,7 @@ async def confirm_print(callback: CallbackQuery, state: FSMContext):
         f"prints/{user_id}.png")
     image2 = base_back_image.resize(tuple(size[1]), Image.Resampling.BICUBIC)
     back = paste(image2, color, print_pos[1], item, 1, angle[1], bg_deleted[1])
+    back = _apply_stickers_overlay(back, data_for_overlay, 1)
     file2 = InputMediaPhoto(media=image_to_bytes(back))
 
     await callback.message.delete()
@@ -1211,8 +1664,9 @@ async def edit_settings(callback: CallbackQuery, state: FSMContext):
     angle = data["angle"]
     size = data["size"]
     image1 = image.resize(tuple(size[0]), Image.Resampling.BICUBIC)
-    front = paste(image1, color, print_pos[0], item, 0, angle[0], bg_deleted[0])
-    file = image_to_bytes(front)
+    base_front = paste(image1, color, print_pos[0], item, 0, angle[0], bg_deleted[0])
+    base_front = _apply_stickers_overlay(base_front, data, 0)
+    file = image_to_bytes(base_front)
     await callback.message.delete()
     try:
         album_id = data["album_id"]
@@ -1224,6 +1678,21 @@ async def edit_settings(callback: CallbackQuery, state: FSMContext):
         pass
     await state.update_data({"album_id": -1, "side": 0})
     await callback.message.answer_photo(file, reply_markup=make_settings_keyboard().as_markup())
+
+
+@router.callback_query(F.data == "edit_stickers")
+async def edit_stickers(callback: CallbackQuery, state: FSMContext):
+    """
+    Переход в режим выбора/редактирования стикеров из настроек принта.
+    """
+    data = await state.get_data()
+    items = data.get("sticker_items") or []
+    if items:
+        from keyboards.print_processing_keyboards import make_stickers_manage_keyboard
+        active = data.get("active_sticker_index")
+        await _show_mockup_after_stickers(callback, state, reply_markup=make_stickers_manage_keyboard(active, len(items)).as_markup())
+    else:
+        await _start_sticker_flow(callback, state)
 
 
 @router.callback_query(F.data == "mailing_unsubscribe")

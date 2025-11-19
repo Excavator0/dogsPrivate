@@ -79,3 +79,37 @@ def make_sticker_zone_keyboard(zones: list[tuple[str, str]]) -> InlineKeyboardBu
     builder.adjust(2)
     builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="stickers_cancel"))
     return builder
+
+
+def make_sticker_categories_keyboard(categories: list[tuple[str, str]]) -> InlineKeyboardBuilder:
+    """
+    Клавиатура выбора категории стикеров.
+    categories: [(title, code), ...]
+    """
+    builder = InlineKeyboardBuilder()
+    for title, code in categories:
+        builder.add(InlineKeyboardButton(text=title, callback_data=f"sticker_cat_{code}"))
+    if categories:
+        builder.adjust(2)
+    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="stickers_back"))
+    return builder
+
+
+def make_sticker_view_keyboard(current_index: int, total: int) -> InlineKeyboardBuilder:
+    """
+    Клавиатура для просмотра одного стикера:
+    ⬅️ / ➡️ / Добавить / Готово / Назад.
+    """
+    builder = InlineKeyboardBuilder()
+    # Навигация влево/вправо
+    if total > 1:
+        builder.add(InlineKeyboardButton(text="⬅️", callback_data="sticker_prev"))
+        builder.add(InlineKeyboardButton(text="➡️", callback_data="sticker_next"))
+        builder.adjust(2)
+    # Добавить текущий
+    builder.row(InlineKeyboardButton(text="Добавить", callback_data="sticker_add"))
+    # Завершить выбор
+    builder.row(InlineKeyboardButton(text="Готово ✅", callback_data="stickers_done"))
+    # Назад к выбору зоны/категории
+    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="stickers_back"))
+    return builder

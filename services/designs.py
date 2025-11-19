@@ -100,3 +100,4 @@ def get_design_preview(design: ReadyDesign) -> BufferedInputFile:
     bio.seek(0)
     return BufferedInputFile(bio.getvalue(), filename=f"{design.id}.jpg")
 
+
