@@ -650,7 +650,10 @@ async def _show_mockup_after_stickers(callback: CallbackQuery, state: FSMContext
     media = InputMediaPhoto(media=file, caption=None)
     if reply_markup is None:
         reply_markup = make_settings_keyboard().as_markup()
-    await callback.message.edit_media(media, reply_markup=reply_markup)
+    try:
+        await callback.message.edit_media(media, reply_markup=reply_markup)
+    except TelegramBadRequest:
+        pass
 
 
 async def _start_sticker_flow(target, state: FSMContext):
@@ -894,8 +897,15 @@ async def stickers_select(callback: CallbackQuery, state: FSMContext):
     from keyboards.print_processing_keyboards import make_stickers_select_keyboard
     data = await state.get_data()
     items = data.get("sticker_items") or []
-    await callback.message.edit_caption("Выбери стикер для редактирования")
-    await callback.message.edit_reply_markup(make_stickers_select_keyboard(len(items)).as_markup())
+    try:
+        await callback.message.edit_caption(
+            caption="Выбери стикер для редактирования",
+            reply_markup=make_stickers_select_keyboard(len(items)).as_markup()
+        )
+    except TelegramBadRequest:
+        await callback.message.edit_reply_markup(
+            reply_markup=make_stickers_select_keyboard(len(items)).as_markup()
+        )
     await callback.answer()
 
 
