@@ -129,34 +129,35 @@ def generate_masks_for_clothes() -> dict:
 
 
 def change_print_shade(image, item):
-    img = image.convert("RGB")
-    d = img.getdata()
-    array = calculate_shades.arrs.get(item)
-    if array is None or len(array) != len(d):
+    """
+    Быстрая векторизованная версия применения оттенков по предрасчитанной карте.
+    Значительно быстрее прежнего построчного цикла.
+    """
+    img_rgb = image.convert("RGB")
+    np_img = numpy.array(img_rgb, dtype=numpy.uint8)  # H x W x 3
+    height, width, _ = np_img.shape
+    shade_codes = calculate_shades.arrs.get(item)
+    if shade_codes is None or len(shade_codes) != height * width:
         return image
 
-    new_image = []
-    for i in range(len(d)):
-        if array[i] == 1:
-            new_image.append(
-                (
-                    int(d[i][0] * lighter_shade_factor),
-                    int(d[i][1] * lighter_shade_factor),
-                    int(d[i][2] * lighter_shade_factor),
-                )
-            )
-        elif array[i] == 2:
-            new_image.append(
-                (int(d[i][0] * shade_factor), int(d[i][1] * shade_factor), int(d[i][2] * shade_factor))
-            )
-        elif array[i] == 3:
-            new_image.append((0, 0, 0))
-        else:
-            new_image.append(d[i])
+    codes = numpy.array(shade_codes, dtype=numpy.uint8).reshape(height, width)  # H x W
+    # Используем расширенный тип, чтобы избежать переполнений при умножении
+    result = np_img.astype(numpy.uint16)
 
-    img.putdata(new_image)
+    mask_light = codes == 1
+    if mask_light.any():
+        result[mask_light] = (result[mask_light] * lighter_shade_factor).clip(0, 255)
 
-    return img
+    mask_shade = codes == 2
+    if mask_shade.any():
+        result[mask_shade] = (result[mask_shade] * shade_factor).clip(0, 255)
+
+    mask_black = codes == 3
+    if mask_black.any():
+        result[mask_black] = 0
+
+    out = result.astype(numpy.uint8)
+    return Image.fromarray(out, mode="RGB")
 
 
 def calculate_outline(item):
@@ -237,9 +238,6 @@ def paste(image, color, pos, item, side, angle, bg_deleted=False):
         tinted.paste(color_layer, (0, 0), mask)
         result = Image.alpha_composite(result, tinted)
     result = Image.alpha_composite(result, masked_layer)
-
-    shade_key = f"{base_item}_{'front' if side == 0 else 'back'}"
-    result = change_print_shade(result, shade_key)
     return result
 
 

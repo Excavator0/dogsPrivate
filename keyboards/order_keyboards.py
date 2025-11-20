@@ -98,7 +98,7 @@ def make_sticker_categories_keyboard(categories: list[tuple[str, str]]) -> Inlin
 def make_sticker_view_keyboard(current_index: int, total: int) -> InlineKeyboardBuilder:
     """
     Клавиатура для просмотра одного стикера:
-    ⬅️ / ➡️ / Добавить / Готово / Назад.
+    ⬅️ / ➡️ / Готово / Назад.
     """
     builder = InlineKeyboardBuilder()
     # Навигация влево/вправо
@@ -106,10 +106,8 @@ def make_sticker_view_keyboard(current_index: int, total: int) -> InlineKeyboard
         builder.add(InlineKeyboardButton(text="⬅️", callback_data="sticker_prev"))
         builder.add(InlineKeyboardButton(text="➡️", callback_data="sticker_next"))
         builder.adjust(2)
-    # Добавить текущий
-    builder.row(InlineKeyboardButton(text="Добавить", callback_data="sticker_add"))
-    # Завершить выбор
-    builder.row(InlineKeyboardButton(text="Готово ✅", callback_data="stickers_done"))
+    # Готово = добавить текущий и завершить (обработаем в sticker_browse)
+    builder.row(InlineKeyboardButton(text="Готово ✅", callback_data="sticker_add"))
     # Назад к выбору зоны/категории
     builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="stickers_back"))
     return builder

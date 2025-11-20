@@ -181,7 +181,7 @@ async def choose_customization(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "back_to_items")
 async def back_to_items(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text('Выбери изделие, на которое хочешь нанести принт')
-    await callback.message.edit_reply_markup(make_type_keyboard(order_types).as_markup())
+    await callback.message.edit_reply_markup(reply_markup=make_type_keyboard(order_types).as_markup())
     await state.set_state(Order.order_type)
 
 
@@ -208,7 +208,7 @@ async def back_to_zones(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     zones = zone_schemes.get(get_base_item(data.get("order_type")), zone_schemes["shirt"])
     await callback.message.edit_text("Выбери зону нанесения принта 👇")
-    await callback.message.edit_reply_markup(make_zone_keyboard(zones).as_markup())
+    await callback.message.edit_reply_markup(reply_markup=make_zone_keyboard(zones).as_markup())
     await state.set_state(Order.zone)
 
 def get_base_item(item_code: str) -> str:
@@ -926,7 +926,7 @@ async def sticker_pick(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "st_move")
 async def sticker_move_main(callback: CallbackQuery):
     from keyboards.print_processing_keyboards import make_sticker_move_keyboard
-    await callback.message.edit_reply_markup(make_sticker_move_keyboard().as_markup())
+    await callback.message.edit_reply_markup(reply_markup=make_sticker_move_keyboard().as_markup())
     await callback.answer()
 
 
@@ -984,7 +984,7 @@ async def sticker_move(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "st_size")
 async def sticker_size_main(callback: CallbackQuery):
     from keyboards.print_processing_keyboards import make_sticker_size_keyboard
-    await callback.message.edit_reply_markup(make_sticker_size_keyboard().as_markup())
+    await callback.message.edit_reply_markup(reply_markup=make_sticker_size_keyboard().as_markup())
     await callback.answer()
 
 
@@ -1029,7 +1029,7 @@ async def sticker_size(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "st_rotate")
 async def sticker_rotate_main(callback: CallbackQuery):
     from keyboards.print_processing_keyboards import make_sticker_rotate_keyboard
-    await callback.message.edit_reply_markup(make_sticker_rotate_keyboard().as_markup())
+    await callback.message.edit_reply_markup(reply_markup=make_sticker_rotate_keyboard().as_markup())
     await callback.answer()
 
 
