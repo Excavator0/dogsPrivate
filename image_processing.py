@@ -205,13 +205,25 @@ def _resolve_template_path(item_code: str, side: int) -> Path:
     raise FileNotFoundError(f"Не найден макет {item_code} ({side_name})")
 
 
-def paste(image, color, pos, item, side, angle, bg_deleted=False):
+def paste(image, color, pos, item, side, angle, bg_deleted=False, zone=None):
     base_item, _ = _split_item_code(item)
     template_path = _resolve_template_path(item, side)
     template = Image.open(template_path).convert("RGBA")
 
     mask_path = MASKS_DIR / f"mask_{base_item}_{'front' if side == 0 else 'back'}.png"
     mask = Image.open(mask_path).convert("L") if mask_path.exists() else None
+    
+    # Создаем дополнительную маску для ограничения области принта
+    from print_bounds import get_print_bounds, create_quad_mask
+    bounds_quad = get_print_bounds(item, side, zone)
+    if bounds_quad:
+        bounds_mask = create_quad_mask(template.size, bounds_quad)
+        # Если есть основная маска одежды, объединяем её с маской области
+        if mask is not None:
+            from PIL import ImageChops
+            mask = ImageChops.darker(mask, bounds_mask)
+        else:
+            mask = bounds_mask
 
     color_layer = None
     if color is not None and mask is not None:
