@@ -9,9 +9,9 @@ from PIL import Image
 
 
 BASE_DIR = Path(__file__).resolve().parent
-PDF_DIR = BASE_DIR / "templates" / "одежда"
-OUT_DIR = BASE_DIR / "templates" / "одежда_png"
-DESIGNS_DIR = BASE_DIR / "templates" / "макеты"
+PDF_DIR = BASE_DIR / "templates" / "new clothes"
+OUT_DIR = BASE_DIR / "templates" / "new clothes"
+# DESIGNS_DIR = BASE_DIR / "templates" / "макеты"
 
 
 def ensure_output_dir() -> None:
@@ -26,7 +26,7 @@ def pdf_to_png_without_background(pdf_path: Path) -> None:
     Конвертирует один PDF-файл в PNG(и) с удалённым фоном.
     Каждый лист PDF сохраняется в отдельный PNG.
     """
-    pages = convert_from_path(str(pdf_path), dpi=300)
+    pages = convert_from_path(str(pdf_path), dpi=150, poppler_path=r"C:\Users\bymrw\Downloads\Release-25.11.0-0\poppler-25.11.0\Library\bin")
 
     for page_index, page in enumerate(pages, start=1):
         # Приводим к RGBA
@@ -51,7 +51,7 @@ def pdf_to_png_without_background(pdf_path: Path) -> None:
         print(f"Сохранён файл: {out_path}")
 
 
-def convert_pdfs_in_place(directory: Path, *, dpi: int = 300, remove_bg: bool = False, delete_pdf: bool = True) -> None:
+def convert_pdfs_in_place(directory: Path, *, dpi: int = 150, remove_bg: bool = False, delete_pdf: bool = True) -> None:
     """
     Конвертирует все PDF в указанной директории в PNG в той же директории.
     По умолчанию удаляет исходные PDF после успешной конвертации.
@@ -64,7 +64,7 @@ def convert_pdfs_in_place(directory: Path, *, dpi: int = 300, remove_bg: bool = 
         return
     for pdf_path in pdf_files:
         print(f"Обработка файла: {pdf_path}")
-        pages = convert_from_path(str(pdf_path), dpi=dpi)
+        pages = convert_from_path(str(pdf_path), dpi=dpi, poppler_path=r"C:\Users\bymrw\Downloads\Release-25.11.0-0\poppler-25.11.0\Library\bin")
         saved_any = False
         for idx, page in enumerate(pages, start=1):
             page = page.convert("RGBA")
@@ -93,12 +93,12 @@ def main() -> None:
     parser.add_argument("--remove-bg", action="store_true", help="Удалять фон (rembg) при конвертации")
     parser.add_argument("--pdf-dir", type=str, help="Папка с PDF (по умолчанию templates/одежда)")
     parser.add_argument("--out-dir", type=str, help="Папка для PNG (по умолчанию templates/одежда_png)")
-    parser.add_argument("--dpi", type=int, default=300, help="DPI для рендеринга PDF")
+    parser.add_argument("--dpi", type=int, default=150, help="DPI для рендеринга PDF")
     args = parser.parse_args()
 
-    if args.designs_in_place:
-        convert_pdfs_in_place(DESIGNS_DIR, dpi=args.dpi, remove_bg=args.remove_bg, delete_pdf=True)
-        return
+    # if args.designs_in_place:
+    #     convert_pdfs_in_place(DESIGNS_DIR, dpi=args.dpi, remove_bg=args.remove_bg, delete_pdf=True)
+    #     return
 
     # Режим старого пайплайна (одежда -> png c удалением фона, в другую папку)
     in_dir = Path(args.pdf_dir) if args.pdf_dir else PDF_DIR
@@ -113,7 +113,7 @@ def main() -> None:
     for pdf_file in pdf_files:
         print(f"Обработка файла: {pdf_file}")
         # Сохраняем поведение: удаление фона и сохранение в out_dir
-        pages = convert_from_path(str(pdf_file), dpi=args.dpi)
+        pages = convert_from_path(str(pdf_file), dpi=args.dpi, poppler_path=r"C:\Users\bymrw\Downloads\Release-25.11.0-0\poppler-25.11.0\Library\bin")
         for page_index, page in enumerate(pages, start=1):
             page = page.convert("RGBA")
             buf = io.BytesIO()

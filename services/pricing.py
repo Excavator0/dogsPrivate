@@ -14,8 +14,25 @@ def calculate_order_price(state_data: Dict, discount_percent: int = 0, pricing: 
     total = cfg["base"]
     addons: List[Tuple[str, int]] = []
 
-    if state_data.get("customization", "photo") in {"ready", "photo", "stickers"}:
-        addons.append(("Доп. элементы (фото питомца)", cfg["photo"]))
+    customization = state_data.get("customization", "photo")
+
+    # Проверяем, есть ли вообще активный принт (не удалённый) —
+    # если пользователь удалил принт на всех сторонах, не берём оплату за фото.
+    has_active_print = False
+    positions = state_data.get("pos")
+    if isinstance(positions, list):
+        for pos in positions:
+            if isinstance(pos, list) and pos and pos[0] != -1:
+                has_active_print = True
+                break
+
+    if has_active_print and customization in {"ready", "photo", "stickers"}:
+        # Для готового дизайна меняем текст строки, чтобы это явно отражалось в расчёте
+        if customization == "ready":
+            title = "Готовый дизайн AIVADOG (с фото питомца)"
+        else:
+            title = "Доп. элементы (фото питомца)"
+        addons.append((title, cfg["photo"]))
         total += cfg["photo"]
 
     sticker_count = len(state_data.get("stickers", []))

@@ -424,7 +424,13 @@ class Database:
             cur = conn.execute("SELECT notes_json FROM orders WHERE id = ?", (order_id,))
             row = cur.fetchone()
             existing = json.loads(row["notes_json"]) if row and row["notes_json"] else {}
-            existing.update(fields)
+            # Интерпретируем значение None как «удалить это поле» из notes_json,
+            # чтобы старые данные (например, о готовом дизайне) не оставались в заказе.
+            for key, value in fields.items():
+                if value is None:
+                    existing.pop(key, None)
+                else:
+                    existing[key] = value
             conn.execute(
                 "UPDATE orders SET notes_json = ?, updated_at = ? WHERE id = ?",
                 (json.dumps(existing, ensure_ascii=False), utcnow(), order_id),

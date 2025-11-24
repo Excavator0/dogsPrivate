@@ -5,6 +5,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, ShippingOption, ShippingQuery, LabeledPrice, PreCheckoutQuery, CallbackQuery, \
     InputMediaPhoto
 from aiogram import Router, F
+from aiogram.exceptions import TelegramBadRequest
 
 from database.db import Database
 from messages import MESSAGES
@@ -73,17 +74,27 @@ async def buy_process(callback: CallbackQuery, state: FSMContext):
                                                   "AIVADOG заказ")
     payload = json.dumps({"order_id": data.get("order_id"), "user_id": callback.from_user.id})
     await callback.message.delete()
-    await callback.message.answer_invoice(
-        title=f"{order_label}",
-        description=message_config['item_description'],
-        provider_token=PAYMENTS_TOKEN,
-        currency='rub',
-        need_email=True,
-        need_phone_number=True,
-        is_flexible=True,
-        prices=[LabeledPrice(label="AIVADOG кастом", amount=price_info["total"] * 100)],
-        start_parameter='aivadog',
-        payload=payload)
+    try:
+        await callback.message.answer_invoice(
+            title=f"{order_label}",
+            description=message_config['item_description'],
+            provider_token=PAYMENTS_TOKEN,
+            currency='rub',
+            need_email=True,
+            need_phone_number=True,
+            is_flexible=True,
+            prices=[LabeledPrice(label="AIVADOG кастом", amount=price_info["total"] * 100)],
+            start_parameter='aivadog',
+            payload=payload,
+        )
+    except TelegramBadRequest as exc:
+        # Шлём подробности админу, чтобы было понятно, почему не открывается окно оплаты
+        await callback.bot.send_message(
+            ADMIN_ID,
+            f"Ошибка при создании инвойса: {exc}\n"
+            f"order_id={data.get('order_id')}, total={price_info.get('total')}",
+        )
+        await callback.answer("Не удалось открыть оплату. Напиши нам, мы поможем 🙏", show_alert=True)
 
 
 @router.shipping_query(lambda q: True)

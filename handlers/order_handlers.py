@@ -36,7 +36,6 @@ order_types = {
     "Футболка • розовая": "shirt_pink",
     "Худи": "hoodie",
     "Свитшот": "sweatshirt",
-    "Кофта на молнии": "zip",
     "Штаны": "pants",
 }
 
@@ -188,7 +187,22 @@ async def back_to_items(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data.in_({"custom_ready", "custom_photo", "custom_stickers"}))
 async def customization_selected(callback: CallbackQuery, state: FSMContext):
     choice = callback.data.replace("custom_", "")
-    await state.update_data({"customization": choice, "stickers_planned": choice == "stickers"})
+    # При смене варианта кастомизации сбрасываем неподходящие данные,
+    # чтобы они не попадали в итоговый расчёт/сообщения
+    update_payload = {
+        "customization": choice,
+        "stickers_planned": choice == "stickers",
+    }
+    # Если пользователь уходит с готового дизайна на фото/стикеры — очищаем выбранный макет
+    if choice != "ready":
+        update_payload.update(
+            {
+                "selected_design_id": None,
+                "selected_design_title": None,
+                "preferred_customization": None,
+            }
+        )
+    await state.update_data(update_payload)
     await callback.answer()
     if choice == "ready":
         data = await state.get_data()
@@ -425,6 +439,15 @@ async def design_change(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(Order.ready_design, F.data == "design_cancel")
 async def design_cancel(callback: CallbackQuery, state: FSMContext):
+    # Полностью выходим из сценария готового дизайна и чистим выбор макета,
+    # чтобы он не учитывался в заказе
+    await state.update_data(
+        {
+            "selected_design_id": None,
+            "selected_design_title": None,
+            "preferred_customization": None,
+        }
+    )
     await callback.message.delete()
     await callback.message.answer(
         "Выбери вариант кастомизации:",
@@ -1478,11 +1501,14 @@ async def confirm_print(callback: CallbackQuery, state: FSMContext):
         "stickers": "Фото + стикеры",
     }.get(customization_code, "Фото питомца")
     pet_name = data.get("pet_name", "—")
+    # Сохраняем информацию о выбранном готовом дизайне (если он есть)
+    design_id = data.get("selected_design_id")
+    design_title = data.get("selected_design_title")
     notes = {}
-    if data.get("selected_design_id"):
-        notes["ready_design_id"] = data["selected_design_id"]
-    if data.get("selected_design_title"):
-        notes["ready_design_title"] = data["selected_design_title"]
+    if design_id:
+        notes["ready_design_id"] = design_id
+    if design_title:
+        notes["ready_design_title"] = design_title
 
     user_row = storage.get_user_by_tg(user_id)
     if not user_row:
@@ -1515,8 +1541,13 @@ async def confirm_print(callback: CallbackQuery, state: FSMContext):
             sticker_zone=data.get("sticker_zone"),
             pet_name=pet_name,
         )
-        if notes:
-            storage.update_order_notes(order_id, **notes)
+        # Обновляем / очищаем данные о готовом дизайне в notes_json:
+        # если макет снят, в БД не должно оставаться старой записи.
+        storage.update_order_notes(
+            order_id,
+            ready_design_id=design_id,
+            ready_design_title=design_title,
+        )
     storage.attach_preview(order_id, front_id, back_id)
     await state.update_data({"order_id": order_id, "order_number": order_number})
 
@@ -1544,6 +1575,10 @@ async def preview_ok(callback: CallbackQuery, state: FSMContext):
     )
     await state.update_data({"price": price_info, "discount_reward_id": reward.id if reward else None})
     text = build_price_message(price_info)
+    # Явно показываем выбранный готовый дизайн в итоговом сообщении перед оплатой
+    design_title = data.get("selected_design_title")
+    if design_title:
+        text = f"Выбранный дизайн: {design_title}\n\n" + text
     if reward:
         text += "\n\nСкидка по твоей ссылке уже применена 💛"
     await callback.message.answer(text, reply_markup=checkout_or_edit_keyboard().as_markup())
