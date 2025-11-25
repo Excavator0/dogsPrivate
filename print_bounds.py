@@ -30,10 +30,11 @@ PRINT_BOUNDS = {
     "shirt_back": [(2048, 1351), (3357, 1351), (3357, 4185), (2048, 4185)],
     
     # Штаны
-    # "pants_front": [(280, 380), (1220, 380), (1180, 1580), (320, 1580)],
-    # "pants_back": [(280, 380), (1220, 380), (1180, 1580), (320, 1580)],
-    # "pants_pant_left": [(180, 480), (720, 480), (680, 1480), (220, 1480)],
-    # "pants_pant_right": [(780, 480), (1320, 480), (1280, 1480), (820, 1480)],
+    # Перед / зад — левая / правая штанина (координаты примерные, уточните под шаблоны)
+    "pants_pant_front_left": [(88, 250), (440, 250), (440, 2437), (88, 2437)],
+    "pants_pant_front_right": [(630, 250), (990, 250), (990, 2437), (630, 2437)],
+    "pants_pant_back_left": [(105, 300), (440, 300), (440, 2437), (105, 2437)],
+    "pants_pant_back_right": [(630, 300), (975, 300), (975, 2437), (630, 2437)],
 }
 
 
@@ -55,7 +56,9 @@ def get_print_bounds(item_code: str, side: int, zone: str = None) -> list[tuple[
     # Определяем ключ для поиска границ
     if zone:
         # Если указана зона (рукав, капюшон, штанина), используем её
-        if zone in ("sleeve_left", "sleeve_right", "hood", "hood_left", "hood_right", "pant_left", "pant_right"):
+        if zone in ("sleeve_left", "sleeve_right", "hood", "hood_left", "hood_right", "pant_left", "pant_right") or zone.startswith(
+            "pant_"
+        ):
             # Поддерживаем несколько вариантов ключей для капюшона
             if zone == "hood":
                 candidates = [
@@ -65,6 +68,12 @@ def get_print_bounds(item_code: str, side: int, zone: str = None) -> list[tuple[
                 ]
                 key = next((k for k in candidates if k in PRINT_BOUNDS), None)
                 if key is None:
+                    return None
+            elif zone in ("pant_left", "pant_right"):
+                # Старые коды штанин мапим на передние зоны
+                mapped = "pant_front_left" if zone == "pant_left" else "pant_front_right"
+                key = f"{base_item}_{mapped}"
+                if key not in PRINT_BOUNDS:
                     return None
             else:
                 key = f"{base_item}_{zone}"

@@ -331,10 +331,13 @@ def _resolve_template_for_paste(item_code: str, side: int, zone: str | None) -> 
     return _resolve_template_path(item_code, side)
 
 
-def paste(image, color, pos, item, side, angle, bg_deleted=False, zone=None):
+def paste(image, color, pos, item, side, angle, bg_deleted=False, zone=None, template_override=None):
     base_item, _ = _split_item_code(item)
-    template_path = _resolve_template_for_paste(item, side, zone)
-    template = Image.open(template_path).convert("RGBA")
+    if template_override and Path(template_override).exists():
+        template = Image.open(template_override).convert("RGBA")
+    else:
+        template_path = _resolve_template_for_paste(item, side, zone)
+        template = Image.open(template_path).convert("RGBA")
 
     mask_path = MASKS_DIR / f"mask_{base_item}_{'front' if side == 0 else 'back'}.png"
     mask = Image.open(mask_path).convert("L") if mask_path.exists() else None
@@ -423,3 +426,17 @@ def json_to_image(arr):
 def print_remove_bg(image):
     img = rembg.remove(image)
     return img
+
+# def remove_only_white():
+#     import numpy as np
+#     from PIL import Image
+#
+#     img = Image.open("templates/одежда_png/pants_front.png").convert("RGBA")
+#     arr = np.array(img)
+#
+#     white = np.all(arr[:, :, :3] == [255, 255, 255], axis=2)
+#
+#     arr[white, 3] = 0  # делаем прозрачным
+#
+#     result = Image.fromarray(arr)
+#     result.save("templates/pants_front.png")

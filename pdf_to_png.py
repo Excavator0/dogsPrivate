@@ -9,8 +9,8 @@ from PIL import Image
 
 
 BASE_DIR = Path(__file__).resolve().parent
-PDF_DIR = BASE_DIR / "templates" / "new clothes"
-OUT_DIR = BASE_DIR / "templates" / "new clothes"
+PDF_DIR = BASE_DIR / "templates" / "одежда"
+OUT_DIR = BASE_DIR / "templates" / "одежда_png"
 # DESIGNS_DIR = BASE_DIR / "templates" / "макеты"
 
 

@@ -67,8 +67,10 @@ zone_schemes = {
         ("Спина", "back"),
     ],
     "pants": [
-        ("Левая штанина", "pant_left"),
-        ("Правая штанина", "pant_right"),
+        ("Перед — левая штанина", "pant_front_left"),
+        ("Перед — правая штанина", "pant_front_right"),
+        ("Зад — левая штанина", "pant_back_left"),
+        ("Зад — правая штанина", "pant_back_right"),
     ],
 }
 
@@ -169,7 +171,9 @@ async def _handle_preselected_ready(target: Union[Message, CallbackQuery], state
 @router.callback_query(F.data.startswith("zone_"))
 async def choose_customization(callback: CallbackQuery, state: FSMContext):
     zone = callback.data.replace("zone_", "")
-    await state.update_data({"order_zone": zone})
+    # Определяем сторону по выбранной зоне: спина / зад штанов -> back (1), остальное -> front (0)
+    side = 1 if zone == "back" or zone in ("pant_back_left", "pant_back_right") else 0
+    await state.update_data({"order_zone": zone, "side": side})
     data = await state.get_data()
     if data.get("preferred_customization") == "ready":
         await _handle_preselected_ready(callback, state)
@@ -243,6 +247,58 @@ def get_template_bounds(item_code: str) -> tuple[int, int]:
         return template.size
 
 
+def _get_template_override_path(data: dict, side: int) -> str | None:
+    overrides = data.get("template_overrides")
+    if isinstance(overrides, list) and len(overrides) > side:
+        path = overrides[side]
+        if path and os.path.exists(path):
+            return path
+    return None
+
+
+def _has_active_print(pos_list) -> bool:
+    if not isinstance(pos_list, list):
+        return False
+    for pos in pos_list:
+        if isinstance(pos, list) and pos and pos[0] != -1:
+            return True
+    return False
+
+
+async def _archive_current_print(state: FSMContext):
+    """
+    Переносит текущий принт/стикеры в «зафиксированные» и подготавливает данные
+    для следующего цикла (после «Хочу ещё выбрать принт»).
+    """
+    data = await state.get_data()
+    applied_photos = data.get("applied_photos", 0)
+    if _has_active_print(data.get("pos")):
+        applied_photos += 1
+    applied_stickers = data.get("applied_stickers") or []
+    applied_stickers.extend(data.get("stickers", []))
+    await state.update_data(
+        {
+            "applied_photos": applied_photos,
+            "applied_stickers": applied_stickers,
+            "stickers": [],
+            "sticker_items": [],
+            "active_sticker_index": None,
+            "current_sticker_codes": [],
+            "current_sticker_index": 0,
+            "current_sticker_category": None,
+            "pos": [[-1, -1], [-1, -1]],
+            "size": [[0, 0], [0, 0]],
+            "angle": [0, 0],
+            "bg_deleted": [False, False],
+            "side": 0,
+            "order_zone": "chest",
+            "customization": None,
+            "selected_design_id": None,
+            "selected_design_title": None,
+        }
+    )
+
+
 def zone_label(zone_code: str) -> str:
     mapping = {
         "chest": "Грудь",
@@ -254,6 +310,10 @@ def zone_label(zone_code: str) -> str:
         "hood_right": "Капюшон справа",
         "pant_left": "Левая штанина",
         "pant_right": "Правая штанина",
+        "pant_front_left": "Перед — левая штанина",
+        "pant_front_right": "Перед — правая штанина",
+        "pant_back_left": "Зад — левая штанина",
+        "pant_back_right": "Зад — правая штанина",
         "photo": "К фото",
     }
     return mapping.get(zone_code, zone_code)
@@ -320,6 +380,9 @@ async def cmd_start(message: Message, state: FSMContext):
         "preferred_customization": None,
         "selected_design_id": None,
         "selected_design_title": None,
+        "template_overrides": [None, None],
+        "applied_photos": 0,
+        "applied_stickers": [],
     })
 
 
@@ -374,13 +437,12 @@ async def menu_choose_item(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "brand_info")
 async def show_brand_info(callback: CallbackQuery):
     text = (
-        "AIVADOG – бренд, созданный из любви к питомцам.\n\n"
+        "AIVADOG – бренд, созданный из любви к питомцам\n\n"
         "Мы создаём одежду и аксессуары с уникальными принтами питомцев, чтобы ваш любимец всегда был рядом с вами, "
-        "ведь каждый день с питомцем – это радость, уют и маленькие моменты, которые делают жизнь ярче.\n"
-        "Мы верим, что любовь к нашим хвостикам можно носить с собой – на худи, футболке, на брелке или шоппере.\n"
-        "C любовью к деталям, этике и качеству – каждый дизайн проходит ручную доработку, печать делается с вниманием к материалам и цветам.\n"
-        "Наше стремление – не просто одежда, а выражение привязанности и радости каждый день/AivaDog – это не просто одежда. "
-        "Это способ показать, как сильно вы связаны со своим любимцем. ❤️"
+        "ведь каждый день с питомцем – это радость, уют и маленькие моменты, которые делают жизнь ярче\n\n"
+        "С любовью к деталям, этике и качеству – каждый дизайн проходит ручную доработку, печать делается с вниманием к материалам и цветам\n\n"
+        "Мы верим, что любовь к нашим хвостикам можно носить с собой – на худи, футболке, на брелке или шоппере\n\n"
+        "AIVADOG – это не просто одежда, а способ показать, как сильно вы связаны со своим любимцем ❤️"
     )
     await callback.message.edit_text(text=text)
     await callback.message.edit_reply_markup(reply_markup=make_back_to_main_keyboard().as_markup())
@@ -521,6 +583,9 @@ async def order_size(callback: CallbackQuery, state: FSMContext):
         "active_sticker_index": None,
         "stickers_planned": False,
         "color": None,
+        "template_overrides": [None, None],
+        "applied_photos": 0,
+        "applied_stickers": [],
     })
     await callback.message.edit_text(text="Выбери размер изделия")
     await callback.message.edit_reply_markup(
@@ -637,7 +702,8 @@ async def _send_initial_mockup(message: Message, state: FSMContext):
         size[side] = list(image.size)
 
     image = image.resize(tuple(size[side]), Image.Resampling.BICUBIC)
-    base = paste(image, color, print_pos[side], item, side, angle[side], bg_deleted[side], zone)
+    template_override = _get_template_override_path(data, side)
+    base = paste(image, color, print_pos[side], item, side, angle[side], bg_deleted[side], zone, template_override=template_override)
     base = _apply_stickers_overlay(base, data, side)
     file = image_to_bytes(base)
     await message.answer_photo(file, reply_markup=confirm_or_setting_keyboard().as_markup())
@@ -713,7 +779,8 @@ async def _show_mockup_after_stickers(callback: CallbackQuery, state: FSMContext
         size[side] = list(image.size)
 
     image = image.resize(tuple(size[side]), Image.Resampling.BICUBIC)
-    base = paste(image, color, print_pos[side], item, side, angle[side], bg_deleted[side], zone)
+    template_override = _get_template_override_path(data, side)
+    base = paste(image, color, print_pos[side], item, side, angle[side], bg_deleted[side], zone, template_override=template_override)
     base = _apply_stickers_overlay(base, data, side)
     file = image_to_bytes(base)
     media = InputMediaPhoto(media=file, caption=None)
@@ -1233,7 +1300,8 @@ async def remove_print_bg(callback: CallbackQuery, state: FSMContext):
         image = print_remove_bg(image)
         image.save(f"prints/{user_id}_bg_deleted.png", "PNG")
         zone = data.get("order_zone", "chest")
-        base = paste(image, color, print_pos[side], item, side, angle[side], True, zone)
+        template_override = _get_template_override_path(data, side)
+        base = paste(image, color, print_pos[side], item, side, angle[side], True, zone, template_override=template_override)
         data = await state.get_data()
         base = _apply_stickers_overlay(base, data, side)
         file = image_to_bytes(base)
@@ -1597,9 +1665,10 @@ def _zone_to_side(zone: str) -> int:
     Маппинг зоны на индекс стороны:
     - грудь -> 0
     - спина -> 1
+    - штаны: pant_back_* -> 1, остальные -> 0
     - остальные зоны считаем отдельными макетами, используем 0
     """
-    if zone == "back":
+    if zone == "back" or zone in ("pant_back_left", "pant_back_right"):
         return 1
     return 0
 
