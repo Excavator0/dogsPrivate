@@ -17,7 +17,7 @@ def make_settings_keyboard():
         callback_data="rotate_print"
     ))
     builder.add(InlineKeyboardButton(
-        text="Сменить сторону",
+        text="Сменить сторону / зону",
         callback_data="change_side"
     ))
     builder.add(InlineKeyboardButton(

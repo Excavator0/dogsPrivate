@@ -45,6 +45,7 @@ lighter_shade_factor = 0.92
 TEMPLATES_DIR = Path("templates")
 CLOTHES_DIR = TEMPLATES_DIR / "одежда_png"
 MASKS_DIR = TEMPLATES_DIR / "masks"
+ZONE_MASKS_DIR = TEMPLATES_DIR / "zone_masks"
 
 
 def _iter_clothes_assets():
@@ -128,6 +129,87 @@ def generate_masks_for_clothes() -> dict:
     return {"removed": removed, "created": created, "skipped": skipped, "total_pairs": len(mapping), "outputs": results}
 
 
+def _resolve_zone_template_path(zone_key: str) -> Optional[Path]:
+    """
+    Подбирает шаблонную картинку для зоны по её ключу из PRINT_BOUNDS.
+    Нужен только для генерации масок зон (debug / отладка).
+    """
+    base, suffix = zone_key.split("_", 1)
+
+    # Зоны, совпадающие с видами (front/back)
+    if suffix in ("front", "back"):
+        for path in CLOTHES_DIR.glob(f"{base}_{suffix}*.png"):
+            if path.exists():
+                return path
+        fallback = TEMPLATES_DIR / f"{base}_{suffix}.png"
+        return fallback if fallback.exists() else None
+
+    # Рукава
+    if suffix == "sleeve_left":
+        cand = CLOTHES_DIR / f"{base}_left_sleeve.png"
+        return cand if cand.exists() else None
+    if suffix == "sleeve_right":
+        cand = CLOTHES_DIR / f"{base}_right_sleeve.png"
+        return cand if cand.exists() else None
+
+    # Капюшон
+    if suffix in ("hood", "hood_left", "hood_right"):
+        for cand in (
+            CLOTHES_DIR / f"{base}_left_hood.png",
+            CLOTHES_DIR / f"{base}_hood.png",
+        ):
+            if cand.exists():
+                return cand
+
+    # Штаны (если добавите зоны для них)
+    if suffix in ("pant_left", "pant_right"):
+        fallback = CLOTHES_DIR / f"{base}_{suffix}.png"
+        return fallback if fallback.exists() else None
+
+    return None
+
+
+def generate_zone_masks() -> dict:
+    """
+    Генерирует отдельные маски для зон из PRINT_BOUNDS.
+    Каждая маска — это белый четырехугольник зоны на чёрном фоне,
+    размер совпадает с соответствующим шаблоном одежды.
+    """
+    from print_bounds import PRINT_BOUNDS, create_quad_mask
+
+    ZONE_MASKS_DIR.mkdir(parents=True, exist_ok=True)
+
+    removed = 0
+    for old in ZONE_MASKS_DIR.glob("*.png"):
+        old.unlink(missing_ok=True)
+        removed += 1
+
+    created = 0
+    skipped = 0
+    outputs: dict[str, str] = {}
+
+    for zone_key, quad in PRINT_BOUNDS.items():
+        template_path = _resolve_zone_template_path(zone_key)
+        if not template_path or not template_path.exists():
+            skipped += 1
+            continue
+        with Image.open(template_path) as tmpl:
+            size = tmpl.size
+        mask = create_quad_mask(size, quad)
+        out_path = ZONE_MASKS_DIR / f"zone_{zone_key}.png"
+        mask.save(out_path, "PNG")
+        created += 1
+        outputs[zone_key] = str(out_path)
+
+    return {
+        "removed": removed,
+        "created": created,
+        "skipped": skipped,
+        "total": len(PRINT_BOUNDS),
+        "outputs": outputs,
+    }
+
+
 def change_print_shade(image, item):
     """
     Быстрая векторизованная версия применения оттенков по предрасчитанной карте.
@@ -205,9 +287,53 @@ def _resolve_template_path(item_code: str, side: int) -> Path:
     raise FileNotFoundError(f"Не найден макет {item_code} ({side_name})")
 
 
+def _resolve_template_for_paste(item_code: str, side: int, zone: str | None) -> Path:
+    """
+    Возвращает путь к нужному макету с учётом зоны (рукав, капюшон и т.п.).
+    Для специальных зон худи/свитшота подставляем отдельные шаблоны,
+    в остальных случаях используем стандартный front/back.
+    """
+    base_item, _ = _split_item_code(item_code)
+
+    # Специальные зоны для худи
+    if base_item == "hoodie" and zone:
+        if zone == "sleeve_left":
+            cand = CLOTHES_DIR / "hoodie_left_sleeve.png"
+            if cand.exists():
+                return cand
+        elif zone == "sleeve_right":
+            cand = CLOTHES_DIR / "hoodie_right_sleeve.png"
+            if cand.exists():
+                return cand
+        elif zone in ("hood", "hood_left"):
+            # для совместимости: общая зона hood и явная hood_left
+            for name in ("hoodie_left_hood.png", "hoodie_hood.png"):
+                cand = CLOTHES_DIR / name
+                if cand.exists():
+                    return cand
+        elif zone == "hood_right":
+            cand = CLOTHES_DIR / "hoodie_right_hood.png"
+            if cand.exists():
+                return cand
+
+    # Специальные зоны для свитшота (рукава)
+    if base_item == "sweatshirt" and zone:
+        if zone == "sleeve_left":
+            cand = CLOTHES_DIR / "sweatshirt_left_sleeve.png"
+            if cand.exists():
+                return cand
+        elif zone == "sleeve_right":
+            cand = CLOTHES_DIR / "sweatshirt_right_sleeve.png"
+            if cand.exists():
+                return cand
+
+    # По умолчанию — стандартный front/back
+    return _resolve_template_path(item_code, side)
+
+
 def paste(image, color, pos, item, side, angle, bg_deleted=False, zone=None):
     base_item, _ = _split_item_code(item)
-    template_path = _resolve_template_path(item, side)
+    template_path = _resolve_template_for_paste(item, side, zone)
     template = Image.open(template_path).convert("RGBA")
 
     mask_path = MASKS_DIR / f"mask_{base_item}_{'front' if side == 0 else 'back'}.png"
@@ -297,11 +423,3 @@ def json_to_image(arr):
 def print_remove_bg(image):
     img = rembg.remove(image)
     return img
-
-# img = paste(None, (176, 37, 37), (0, 0), "cup", 0, 0)
-# img.show()
-
-# mask = calculate_outline("cup_front")
-# mask.save(f"templates/masks/mask_cup_front.png", "PNG")
-
-# generate_masks_for_clothes()

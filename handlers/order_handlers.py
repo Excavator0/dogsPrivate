@@ -51,10 +51,16 @@ zone_schemes = {
     "hoodie": [
         ("Грудь", "chest"),
         ("Спина", "back"),
+        ("Левый рукав", "sleeve_left"),
+        ("Правый рукав", "sleeve_right"),
+        ("Капюшон слева", "hood_left"),
+        ("Капюшон справа", "hood_right"),
     ],
     "sweatshirt": [
         ("Грудь", "chest"),
         ("Спина", "back"),
+        ("Левый рукав", "sleeve_left"),
+        ("Правый рукав", "sleeve_right"),
     ],
     "zip": [
         ("Грудь", "chest"),
@@ -88,7 +94,7 @@ def designs_available() -> bool:
 
 
 def _design_caption(design) -> str:
-    return f"«{design.title}» — фирменный макет AIVADOG. Добавим твоего питомца и покажем предпросмотр!"
+    return f"«{design.title}» — фирменный макет AIVADOG. Добавим твоего питомца, дизайнер адаптирует его под стиль макета и покажем предпросмотр."
 
 
 def _design_keyboard(mode: str, index: int, design_id: str) -> InlineKeyboardBuilder:
@@ -244,6 +250,8 @@ def zone_label(zone_code: str) -> str:
         "sleeve_left": "Левый рукав",
         "sleeve_right": "Правый рукав",
         "hood": "Капюшон",
+        "hood_left": "Капюшон слева",
+        "hood_right": "Капюшон справа",
         "pant_left": "Левая штанина",
         "pant_right": "Правая штанина",
         "photo": "К фото",
@@ -297,6 +305,7 @@ async def cmd_start(message: Message, state: FSMContext):
               "• выбрать изделие\n"
               "• загрузить фото хвостика 🐶\n"
               "• добавить фирменные принты и стикеры\n"
+              "• передать макет дизайнеру\n"
               "• увидеть предпросмотр и оплатить заказ\n\n"
               "С чего начнём?👇"),
         reply_markup=make_main_menu_keyboard().as_markup()
@@ -472,7 +481,8 @@ async def design_pick(callback: CallbackQuery, state: FSMContext):
     })
     await callback.message.delete()
     await callback.message.answer(
-        f"Отлично! Теперь загрузи фото своего питомца документом (PNG/JPG до 2 МБ), чтобы мы вставили его в макет «{design.title}».",
+        f"Отлично! Теперь загрузи фото своего питомца документом (PNG/JPG до 2 МБ), чтобы мы вставили его в макет «{design.title}».\n"
+        f"⚠️ Важно: ракурс питомца должен быть похож на пример в выбранном дизайне.",
     )
     await state.set_state(Order.image_sent)
 
@@ -486,11 +496,12 @@ async def back_to_main(callback: CallbackQuery):
     await callback.message.answer(
         text=("Привет! Я — AIVADOG-бот! 🐾\n\n"
               "Добро пожаловать в AIVADOG — место, где твой питомец становится частью твоего стиля 💛\n\n"
-              "Здесь ты можешь:\n\n"
-              "• выбрать изделие (футболку, худи, свитшот, штаны, брелок или шоппер),\n\n"
-              "• загрузить фото своей собачки 🐶,\n\n"
-              "• добавить фирменные принты и стикеры,\n\n"
-              "• увидеть готовый предпросмотр перед заказом!\n\n"
+              "Здесь ты можешь:\n"
+              "• выбрать изделие\n"
+              "• загрузить фото своей собачки 🐶\n"
+              "• добавить фирменные принты и стикеры\n"
+              "• передать макет дизайнеру\n"
+              "• увидеть предпросмотр и оплатить заказ\n\n"
               "С чего начнём?👇"),
         reply_markup=make_main_menu_keyboard().as_markup()
     )
@@ -606,10 +617,20 @@ async def _send_initial_mockup(message: Message, state: FSMContext):
     size = data.get("size") or [[0, 0], [0, 0]]
     bg_deleted = data.get("bg_deleted") or [False, False]
 
-    if bg_deleted[side]:
-        image = Image.open(f"prints/{user_id}_bg_deleted.png")
+    customization = data.get("customization", "photo")
+    if customization == "ready" and data.get("selected_design_id"):
+        design = find_design(data["selected_design_id"])
+        from services.designs import _build_preview
+        design_path = _build_preview(design) if design else None
+        if design_path:
+            image = Image.open(design_path)
+        else:
+            image = Image.open(f"prints/{user_id}.png")
     else:
-        image = Image.open(f"prints/{user_id}.png")
+        if bg_deleted[side]:
+            image = Image.open(f"prints/{user_id}_bg_deleted.png")
+        else:
+            image = Image.open(f"prints/{user_id}.png")
 
     # Если размеры ещё не были сохранены, используем исходный размер изображения
     if not size[side] or size[side][0] == 0 or size[side][1] == 0:
@@ -673,10 +694,20 @@ async def _show_mockup_after_stickers(callback: CallbackQuery, state: FSMContext
     size = data.get("size") or [[0, 0], [0, 0]]
     bg_deleted = data.get("bg_deleted") or [False, False]
 
-    if bg_deleted[side]:
-        image = Image.open(f"prints/{user_id}_bg_deleted.png")
+    customization = data.get("customization", "photo")
+    if customization == "ready" and data.get("selected_design_id"):
+        design = find_design(data["selected_design_id"])
+        from services.designs import _build_preview
+        design_path = _build_preview(design) if design else None
+        if design_path:
+            image = Image.open(design_path)
+        else:
+            image = Image.open(f"prints/{user_id}.png")
     else:
-        image = Image.open(f"prints/{user_id}.png")
+        if bg_deleted[side]:
+            image = Image.open(f"prints/{user_id}_bg_deleted.png")
+        else:
+            image = Image.open(f"prints/{user_id}.png")
 
     if not size[side] or size[side][0] == 0 or size[side][1] == 0:
         size[side] = list(image.size)
@@ -720,8 +751,7 @@ async def _show_order_summary(message: Message, state: FSMContext):
     order_label = next((label for label, code in order_types.items() if code == item), "Изделие")
     zone = zone_label(data.get("order_zone", "chest"))
     stickers_codes = data.get("stickers", [])
-    titles_map = {code: text for text, code in sticker_catalog}
-    stickers_text = ", ".join(titles_map.get(code, code) for code in stickers_codes) if stickers_codes else "Без стикеров"
+    stickers_text = str(len(stickers_codes)) if stickers_codes else "0"
     customization_code = data.get("customization", "photo")
     customization_text = {
         "ready": "Готовый дизайн AIVADOG",
@@ -827,7 +857,7 @@ async def sticker_category_selected(callback: CallbackQuery, state: FSMContext):
         return
 
     file = FSInputFile(path)
-    media = InputMediaPhoto(media=file, caption="Листай стикеры и нажми «Добавить», чтобы выбрать 🐾")
+    media = InputMediaPhoto(media=file, caption="Листай стикеры и нажми «Готово ✅», чтобы выбрать 🐾")
     # Показываем первый стикер в том же сообщении, где был макет
     await callback.message.edit_media(
         media, reply_markup=make_sticker_view_keyboard(0, len(codes)).as_markup()
@@ -908,7 +938,7 @@ async def sticker_browse(callback: CallbackQuery, state: FSMContext):
     file = FSInputFile(path)
     media = InputMediaPhoto(
         media=file,
-        caption="Листай стикеры и нажми «Добавить», чтобы выбрать 🐾",
+        caption="Листай стикеры и нажми «Готово ✅», чтобы выбрать 🐾",
     )
     try:
         await callback.message.edit_media(
@@ -1246,10 +1276,20 @@ async def print_size(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     bg_deleted = data["bg_deleted"]
     side = data["side"]
-    if bg_deleted[side]:
-        image = Image.open(f"prints/{user_id}_bg_deleted.png")
+    customization = data.get("customization", "photo")
+    if customization == "ready" and data.get("selected_design_id"):
+        design = find_design(data["selected_design_id"])
+        from services.designs import _build_preview
+        design_path = _build_preview(design) if design else None
+        if design_path:
+            image = Image.open(design_path)
+        else:
+            image = Image.open(f"prints/{user_id}.png")
     else:
-        image = Image.open(f"prints/{user_id}.png")
+        if bg_deleted[side]:
+            image = Image.open(f"prints/{user_id}_bg_deleted.png")
+        else:
+            image = Image.open(f"prints/{user_id}.png")
     item = data["order_type"]
     zone = data.get("order_zone", "chest")
     template_width, template_height = get_template_bounds(item)
@@ -1263,8 +1303,10 @@ async def print_size(callback: CallbackQuery, state: FSMContext):
     # Получаем границы для размещения принта
     bounds = get_print_bounds(item, side, zone)
     if bounds:
-        max_width = bounds[2] - bounds[0]
-        max_height = bounds[3] - bounds[1]
+        xs = [p[0] for p in bounds]
+        ys = [p[1] for p in bounds]
+        max_width = max(xs) - min(xs)
+        max_height = max(ys) - min(ys)
     else:
         max_width = template_width
         max_height = template_height
@@ -1317,10 +1359,20 @@ async def move_print(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     bg_deleted = data["bg_deleted"]
     side = data["side"]
-    if bg_deleted[side]:
-        image = Image.open(f"prints/{user_id}_bg_deleted.png")
+    customization = data.get("customization", "photo")
+    if customization == "ready" and data.get("selected_design_id"):
+        design = find_design(data["selected_design_id"])
+        from services.designs import _build_preview
+        design_path = _build_preview(design) if design else None
+        if design_path:
+            image = Image.open(design_path)
+        else:
+            image = Image.open(f"prints/{user_id}.png")
     else:
-        image = Image.open(f"prints/{user_id}.png")
+        if bg_deleted[side]:
+            image = Image.open(f"prints/{user_id}_bg_deleted.png")
+        else:
+            image = Image.open(f"prints/{user_id}.png")
     item = data["order_type"]
     zone = data.get("order_zone", "chest")
     template_width, template_height = get_template_bounds(item)
@@ -1331,14 +1383,21 @@ async def move_print(callback: CallbackQuery, state: FSMContext):
     
     # Получаем границы для размещения принта
     bounds = get_print_bounds(item, side, zone)
-    
+
     pos_changed = False
     if callback.data == "move_right":
         new_x = print_pos[side][0] + size_step
         if bounds:
-            max_x = bounds[2] - size[side][0]
-            if new_x <= max_x:
-                print_pos[side][0] = new_x
+            # Используем clamp_position, чтобы не выходить за рамки многоугольника
+            clamped_x, _ = clamp_position(
+                new_x,
+                print_pos[side][1],
+                size[side][0],
+                size[side][1],
+                bounds,
+            )
+            if clamped_x != print_pos[side][0]:
+                print_pos[side][0] = clamped_x
                 pos_changed = True
             else:
                 await callback.answer("Достигнут максимум сдвига вправо")
@@ -1351,9 +1410,15 @@ async def move_print(callback: CallbackQuery, state: FSMContext):
     elif callback.data == "move_left":
         new_x = print_pos[side][0] - size_step
         if bounds:
-            min_x = bounds[0]
-            if new_x >= min_x:
-                print_pos[side][0] = new_x
+            clamped_x, _ = clamp_position(
+                new_x,
+                print_pos[side][1],
+                size[side][0],
+                size[side][1],
+                bounds,
+            )
+            if clamped_x != print_pos[side][0]:
+                print_pos[side][0] = clamped_x
                 pos_changed = True
             else:
                 await callback.answer("Достигнут максимум сдвига влево")
@@ -1366,9 +1431,15 @@ async def move_print(callback: CallbackQuery, state: FSMContext):
     elif callback.data == "move_up":
         new_y = print_pos[side][1] - size_step
         if bounds:
-            min_y = bounds[1]
-            if new_y >= min_y:
-                print_pos[side][1] = new_y
+            _, clamped_y = clamp_position(
+                print_pos[side][0],
+                new_y,
+                size[side][0],
+                size[side][1],
+                bounds,
+            )
+            if clamped_y != print_pos[side][1]:
+                print_pos[side][1] = clamped_y
                 pos_changed = True
             else:
                 await callback.answer("Достигнут максимум сдвига вверх")
@@ -1381,9 +1452,15 @@ async def move_print(callback: CallbackQuery, state: FSMContext):
     elif callback.data == "move_down":
         new_y = print_pos[side][1] + size_step
         if bounds:
-            max_y = bounds[3] - size[side][1]
-            if new_y <= max_y:
-                print_pos[side][1] = new_y
+            _, clamped_y = clamp_position(
+                print_pos[side][0],
+                new_y,
+                size[side][0],
+                size[side][1],
+                bounds,
+            )
+            if clamped_y != print_pos[side][1]:
+                print_pos[side][1] = clamped_y
                 pos_changed = True
             else:
                 await callback.answer("Достигнут максимум сдвига вниз")
@@ -1441,10 +1518,20 @@ async def rotate_print(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     bg_deleted = data["bg_deleted"]
     side = data["side"]
-    if bg_deleted[side]:
-        image = Image.open(f"prints/{user_id}_bg_deleted.png")
+    customization = data.get("customization", "photo")
+    if customization == "ready" and data.get("selected_design_id"):
+        design = find_design(data["selected_design_id"])
+        from services.designs import _build_preview
+        design_path = _build_preview(design) if design else None
+        if design_path:
+            image = Image.open(design_path)
+        else:
+            image = Image.open(f"prints/{user_id}.png")
     else:
-        image = Image.open(f"prints/{user_id}.png")
+        if bg_deleted[side]:
+            image = Image.open(f"prints/{user_id}_bg_deleted.png")
+        else:
+            image = Image.open(f"prints/{user_id}.png")
     item = data["order_type"]
     color = data.get("color")
     print_pos = data["pos"]
@@ -1467,50 +1554,133 @@ async def rotate_print(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "change_side")
 async def change_side(callback: CallbackQuery, state: FSMContext):
+    """
+    Вместо простого переключения front/back показываем выбор стороны/зоны
+    в зависимости от типа изделия (худи, свитшот, футболка и т.п.).
+    """
+    data = await state.get_data()
+    item = data.get("order_type")
+    if not item:
+        await callback.answer()
+        return
+    base_item = get_base_item(item)
+    zones = zone_schemes.get(base_item)
+    # Если для изделия нет схемы зон — оставляем старое поведение (front/back)
+    if not zones:
+        await callback.answer()
+        return
+
+    current_zone = data.get("order_zone", "chest")
+    builder = InlineKeyboardBuilder()
+    for title, code in zones:
+        if code == current_zone:
+            continue
+        builder.add(
+            InlineKeyboardButton(
+                text=title,
+                callback_data=f"side_zone_{code}",
+            )
+        )
+    builder.add(
+        InlineKeyboardButton(
+            text="🔙 Назад",
+            callback_data="settings",
+        )
+    )
+    builder.adjust(2, 2)
+    await callback.message.edit_reply_markup(reply_markup=builder.as_markup())
+    await callback.answer()
+
+
+def _zone_to_side(zone: str) -> int:
+    """
+    Маппинг зоны на индекс стороны:
+    - грудь -> 0
+    - спина -> 1
+    - остальные зоны считаем отдельными макетами, используем 0
+    """
+    if zone == "back":
+        return 1
+    return 0
+
+
+@router.callback_query(F.data.startswith("side_zone_"))
+async def change_side_zone(callback: CallbackQuery, state: FSMContext):
+    """
+    Переключение на другую сторону/зону из настроек.
+    Пересчитываем позицию и показываем новый макет.
+    """
+    new_zone = callback.data.replace("side_zone_", "")
     data = await state.get_data()
     user_id = callback.from_user.id
-    bg_deleted = data["bg_deleted"]
-    side = data["side"]
-
     item = data["order_type"]
-    zone = data.get("order_zone", "chest")
-    template_width, template_height = get_template_bounds(item)
     color = data.get("color")
+    bg_deleted = data["bg_deleted"]
     print_pos = data["pos"]
     angle = data["angle"]
     size = data["size"]
-    if side == 0:
-        side = 1
-    else:
-        side = 0
-    if bg_deleted[side]:
-        image = Image.open(f"prints/{user_id}_bg_deleted.png")
-    else:
-        image = Image.open(f"prints/{user_id}.png")
-    if print_pos[side][0] == -1:
-        # Получаем границы для новой стороны
-        bounds = get_print_bounds(item, side, zone)
-        if bounds:
-            # Центрируем в пределах допустимой области
-            print_pos[side] = list(get_centered_position_in_bounds(
-                image.size[0], image.size[1], bounds
-            ))
+
+    # Сторона, с которой мы уходим
+    old_side = data.get("side", 0)
+    # Новая сторона для выбранной зоны (грудь/спина/остальные)
+    side = _zone_to_side(new_zone)
+
+    # Отключаем принт на старой стороне, если он там был
+    if isinstance(print_pos[old_side], list):
+        print_pos[old_side] = "deleted"
+
+    # Открываем исходное изображение пользователя / дизайн
+    customization = data.get("customization", "photo")
+    if customization == "ready" and data.get("selected_design_id"):
+        design = find_design(data["selected_design_id"])
+        from services.designs import _build_preview  # внутренний, но подходит
+        design_path = _build_preview(design) if design else None
+        if design_path:
+            image = Image.open(design_path)
         else:
-            # Стандартное центрирование
-            print_pos[side] = [(template_width - image.size[0]) // 2,
-                               (template_height - image.size[1]) // 2]
+            image = Image.open(f"prints/{user_id}.png")
+    else:
+        if bg_deleted[side]:
+            image = Image.open(f"prints/{user_id}_bg_deleted.png")
+        else:
+            image = Image.open(f"prints/{user_id}.png")
+
+    template_width, template_height = get_template_bounds(item)
+
+    # Если ещё нет размера для этой стороны — берём размеры исходника
+    if not size[side] or size[side][0] == 0 or size[side][1] == 0:
         size[side] = list(image.size)
-        angle[side] = 0
-    elif print_pos[side] != "deleted":
-        image = image.resize(tuple(size[side]), Image.Resampling.BICUBIC)
-    zone = data.get("order_zone", "chest")
-    base = paste(image, color, print_pos[side], item, side, angle[side], bg_deleted[side], zone)
+
+    bounds = get_print_bounds(item, side, new_zone)
+    if bounds:
+        pos = list(
+            get_centered_position_in_bounds(size[side][0], size[side][1], bounds)
+        )
+    else:
+        pos = [
+            (template_width - size[side][0]) // 2,
+            (template_height - size[side][1]) // 2,
+        ]
+    print_pos[side] = pos
+    angle[side] = 0
+
+    image = image.resize(tuple(size[side]), Image.Resampling.BICUBIC)
+    base = paste(image, color, print_pos[side], item, side, angle[side], bg_deleted[side], new_zone)
     data = await state.get_data()
     base = _apply_stickers_overlay(base, data, side)
     file = image_to_bytes(base)
-    file = InputMediaPhoto(media=file)
-    await state.update_data({"pos": print_pos, "side": side, "bg_deleted": bg_deleted, "angle": angle, "size": size})
-    await callback.message.edit_media(file, reply_markup=make_settings_keyboard().as_markup())
+    media = InputMediaPhoto(media=file)
+    await state.update_data(
+        {
+            "order_zone": new_zone,
+            "pos": print_pos,
+            "side": side,
+            "angle": angle,
+            "size": size,
+        }
+    )
+    await callback.message.edit_media(media, reply_markup=make_settings_keyboard().as_markup())
+    await callback.answer()
 
 
 @router.callback_query(F.data == "delete_print")
@@ -1558,8 +1728,18 @@ async def confirm_print(callback: CallbackQuery, state: FSMContext):
             item = value
             await state.update_data({"order_type": item})
     zone = data.get("order_zone", "chest")
-    base_image = Image.open(f"prints/{user_id}_bg_deleted.png") if bg_deleted[0] else Image.open(
-        f"prints/{user_id}.png")
+    customization = data.get("customization", "photo")
+    if customization == "ready" and data.get("selected_design_id"):
+        design = find_design(data["selected_design_id"])
+        from services.designs import _build_preview
+        design_path = _build_preview(design) if design else None
+        if design_path:
+            base_image = Image.open(design_path)
+        else:
+            base_image = Image.open(f"prints/{user_id}.png")
+    else:
+        base_image = Image.open(f"prints/{user_id}_bg_deleted.png") if bg_deleted[0] else Image.open(
+            f"prints/{user_id}.png")
     image1 = base_image.resize(tuple(size[0]), Image.Resampling.BICUBIC)
     front = paste(image1, color, print_pos[0], item, 0, angle[0], bg_deleted[0], zone)
     data_for_overlay = await state.get_data()
@@ -1569,8 +1749,18 @@ async def confirm_print(callback: CallbackQuery, state: FSMContext):
     if isinstance(print_pos[1], list) and print_pos[1][0] == -1:
         print_pos[1] = "deleted"
 
-    base_back_image = Image.open(f"prints/{user_id}_bg_deleted.png") if bg_deleted[1] else Image.open(
-        f"prints/{user_id}.png")
+    if customization == "ready" and data.get("selected_design_id"):
+        # тот же макет для второй стороны
+        design = find_design(data["selected_design_id"])
+        from services.designs import _build_preview
+        design_path = _build_preview(design) if design else None
+        if design_path:
+            base_back_image = Image.open(design_path)
+        else:
+            base_back_image = Image.open(f"prints/{user_id}.png")
+    else:
+        base_back_image = Image.open(f"prints/{user_id}_bg_deleted.png") if bg_deleted[1] else Image.open(
+            f"prints/{user_id}.png")
     image2 = base_back_image.resize(tuple(size[1]), Image.Resampling.BICUBIC)
     back = paste(image2, color, print_pos[1], item, 1, angle[1], bg_deleted[1], zone)
     back = _apply_stickers_overlay(back, data_for_overlay, 1)
