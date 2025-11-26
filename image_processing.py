@@ -331,16 +331,39 @@ def _resolve_template_for_paste(item_code: str, side: int, zone: str | None) -> 
     return _resolve_template_path(item_code, side)
 
 
+def _is_special_zone(zone: str | None) -> bool:
+    """
+    Проверяет, является ли зона специальной (рукав, капюшон, штанина),
+    для которой нужен отдельный шаблон вместо front/back.
+    """
+    if not zone:
+        return False
+    special_zones = (
+        "sleeve_left", "sleeve_right",
+        "hood", "hood_left", "hood_right",
+        "pant_front_left", "pant_front_right",
+        "pant_back_left", "pant_back_right",
+    )
+    return zone in special_zones
+
+
 def paste(image, color, pos, item, side, angle, bg_deleted=False, zone=None, template_override=None):
     base_item, _ = _split_item_code(item)
-    if template_override and Path(template_override).exists():
+    # Для специальных зон (рукав, капюшон) игнорируем template_override,
+    # так как он содержит front/back макет, а не шаблон этой зоны
+    use_override = template_override and Path(template_override).exists() and not _is_special_zone(zone)
+    if use_override:
         template = Image.open(template_override).convert("RGBA")
     else:
         template_path = _resolve_template_for_paste(item, side, zone)
         template = Image.open(template_path).convert("RGBA")
 
-    mask_path = MASKS_DIR / f"mask_{base_item}_{'front' if side == 0 else 'back'}.png"
-    mask = Image.open(mask_path).convert("L") if mask_path.exists() else None
+    # Для специальных зон (рукав, капюшон) маска front/back не применима
+    if _is_special_zone(zone):
+        mask = None
+    else:
+        mask_path = MASKS_DIR / f"mask_{base_item}_{'front' if side == 0 else 'back'}.png"
+        mask = Image.open(mask_path).convert("L") if mask_path.exists() else None
     
     # Создаем дополнительную маску для ограничения области принта
     from print_bounds import get_print_bounds, create_quad_mask

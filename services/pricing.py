@@ -26,16 +26,21 @@ def calculate_order_price(state_data: Dict, discount_percent: int = 0, pricing: 
                 has_active_print = True
                 break
 
+    photo_count = state_data.get("applied_photos", 0)
     if has_active_print and customization in {"ready", "photo", "stickers"}:
-        # Для готового дизайна меняем текст строки, чтобы это явно отражалось в расчёте
+        photo_count += 1
+    if photo_count:
         if customization == "ready":
             title = "Готовый дизайн AIVADOG (с фото питомца)"
         else:
             title = "Доп. элементы (фото питомца)"
-        addons.append((title, cfg["photo"]))
-        total += cfg["photo"]
+        if photo_count > 1:
+            title = f"{title} ×{photo_count}"
+        addon_cost = cfg["photo"] * photo_count
+        addons.append((title, addon_cost))
+        total += addon_cost
 
-    sticker_count = len(state_data.get("stickers", []))
+    sticker_count = len(state_data.get("applied_stickers", [])) + len(state_data.get("stickers", []))
     if sticker_count:
         addon_cost = sticker_count * cfg["sticker"]
         addons.append((f"Стикеры ×{sticker_count}", addon_cost))

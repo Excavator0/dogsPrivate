@@ -1,19 +1,33 @@
 """
 Конфигурация допустимых областей для размещения принтов на одежде.
-Каждая область задается четырехугольником произвольной формы.
-Формат: [(x1, y1), (x2, y2), (x3, y3), (x4, y4)]
-где точки идут по часовой стрелке: верхний левый, верхний правый, нижний правый, нижний левый
+Каждая область задается полигоном произвольной формы (любое количество точек).
+Формат: [(x1, y1), (x2, y2), ..., (xN, yN)]
+где точки идут по часовой стрелке, образуя замкнутый контур.
 """
 
 # Словарь границ для каждого типа одежды и стороны
 # Ключ: "{тип_одежды}_{сторона}" (например, "hoodie_front", "hoodie_back")
-# Значение: список из 4 точек (x, y) по часовой стрелке
+# Значение: список точек (x, y) по часовой стрелке (полигон)
 PRINT_BOUNDS = {
 
     # Худи
-    # Область спины (трапеция - уже внизу, шире вверху у плеч)
     "hoodie_front": [(473, 821), (913, 821), (913, 1353), (473, 1353)],
-    "hoodie_back": [(581, 946), (1144, 946), (1144, 2084), (581, 2084)],
+    # Спина худи — сложный полигон из 13 точек
+    "hoodie_back": [
+        (391, 879),
+        (451, 1303),
+        (391, 2099),
+        (437, 2214),
+        (1298, 2242),
+        (1339, 2067),
+        (1293, 1689),
+        (1335, 1330),
+        (1353, 948),
+        (1303, 852),
+        (1086, 783),
+        (1040, 746),
+        (658, 732),
+    ],
     "hoodie_sleeve_left": [(537, 1348), (866, 1348), (866, 2050), (537, 2050)],
     "hoodie_sleeve_right": [(730, 1280), (1040, 1280), (1040, 2700), (730, 2700)],
     "hoodie_hood_left": [(634, 307), (1149, 307), (1149, 1040), (634, 1040)],
@@ -48,7 +62,7 @@ def get_print_bounds(item_code: str, side: int, zone: str = None) -> list[tuple[
         zone: Зона нанесения (например, "chest", "back", "sleeve_left", "hood", "pant_left")
     
     Returns:
-        Список из 4 точек [(x1,y1), (x2,y2), (x3,y3), (x4,y4)] или None, если границы не заданы
+        Список точек полигона [(x1,y1), (x2,y2), ..., (xN,yN)] или None, если границы не заданы
     """
     # Извлекаем базовый тип изделия (без цвета)
     base_item = item_code.split("_")[0]
@@ -91,18 +105,18 @@ def get_print_bounds(item_code: str, side: int, zone: str = None) -> list[tuple[
     return PRINT_BOUNDS.get(key)
 
 
-def _get_quad_bounding_box(quad: list[tuple[int, int]]) -> tuple[int, int, int, int]:
+def _get_polygon_bounding_box(polygon: list[tuple[int, int]]) -> tuple[int, int, int, int]:
     """
-    Получить ограничивающий прямоугольник для четырехугольника.
+    Получить ограничивающий прямоугольник для полигона.
     
     Args:
-        quad: Список из 4 точек
+        polygon: Список точек полигона (любое количество)
         
     Returns:
         (x_min, y_min, x_max, y_max)
     """
-    xs = [p[0] for p in quad]
-    ys = [p[1] for p in quad]
+    xs = [p[0] for p in polygon]
+    ys = [p[1] for p in polygon]
     return (min(xs), min(ys), max(xs), max(ys))
 
 
@@ -115,19 +129,19 @@ def clamp_position(
 ) -> tuple[int, int]:
     """
     Ограничить позицию принта так, чтобы он полностью находился в пределах допустимой области.
-    Для четырехугольника произвольной формы используем ограничивающий прямоугольник.
+    Для полигона произвольной формы используем ограничивающий прямоугольник (bounding box).
     
     Args:
         print_x: X координата левого верхнего угла принта
         print_y: Y координата левого верхнего угла принта
         print_width: Ширина принта
         print_height: Высота принта
-        bounds: Четырехугольник из 4 точек [(x1,y1), (x2,y2), (x3,y3), (x4,y4)]
+        bounds: Полигон из N точек [(x1,y1), (x2,y2), ..., (xN,yN)]
     
     Returns:
         Скорректированные координаты (x, y)
     """
-    x_min, y_min, x_max, y_max = _get_quad_bounding_box(bounds)
+    x_min, y_min, x_max, y_max = _get_polygon_bounding_box(bounds)
     
     # Ограничиваем X
     clamped_x = max(x_min, min(print_x, x_max - print_width))
@@ -147,19 +161,19 @@ def is_position_valid(
 ) -> bool:
     """
     Проверить, находится ли принт полностью в пределах допустимой области.
-    Для четырехугольника произвольной формы используем ограничивающий прямоугольник.
+    Для полигона произвольной формы используем ограничивающий прямоугольник (bounding box).
     
     Args:
         print_x: X координата левого верхнего угла принта
         print_y: Y координата левого верхнего угла принта
         print_width: Ширина принта
         print_height: Высота принта
-        bounds: Четырехугольник из 4 точек [(x1,y1), (x2,y2), (x3,y3), (x4,y4)]
+        bounds: Полигон из N точек [(x1,y1), (x2,y2), ..., (xN,yN)]
     
     Returns:
         True, если принт полностью в пределах области
     """
-    x_min, y_min, x_max, y_max = _get_quad_bounding_box(bounds)
+    x_min, y_min, x_max, y_max = _get_polygon_bounding_box(bounds)
     
     # Проверяем, что все углы принта находятся в пределах области
     return (
@@ -177,17 +191,17 @@ def get_centered_position_in_bounds(
 ) -> tuple[int, int]:
     """
     Получить центрированную позицию принта в пределах допустимой области.
-    Для четырехугольника произвольной формы используем центр ограничивающего прямоугольника.
+    Для полигона произвольной формы используем центр ограничивающего прямоугольника (bounding box).
     
     Args:
         print_width: Ширина принта
         print_height: Высота принта
-        bounds: Четырехугольник из 4 точек [(x1,y1), (x2,y2), (x3,y3), (x4,y4)]
+        bounds: Полигон из N точек [(x1,y1), (x2,y2), ..., (xN,yN)]
     
     Returns:
         Координаты (x, y) для центрированного размещения
     """
-    x_min, y_min, x_max, y_max = _get_quad_bounding_box(bounds)
+    x_min, y_min, x_max, y_max = _get_polygon_bounding_box(bounds)
     
     # Вычисляем центр области
     center_x = (x_min + x_max) // 2
@@ -201,21 +215,25 @@ def get_centered_position_in_bounds(
     return clamp_position(pos_x, pos_y, print_width, print_height, bounds)
 
 
-def create_quad_mask(template_size: tuple[int, int], quad: list[tuple[int, int]]):
+def create_polygon_mask(template_size: tuple[int, int], polygon: list[tuple[int, int]]):
     """
-    Создать маску из четырехугольника для ограничения области принта.
+    Создать маску из полигона для ограничения области принта.
     
     Args:
         template_size: Размер шаблона (width, height)
-        quad: Четырехугольник из 4 точек [(x1,y1), (x2,y2), (x3,y3), (x4,y4)]
+        polygon: Полигон из N точек [(x1,y1), (x2,y2), ..., (xN,yN)]
     
     Returns:
-        PIL Image в режиме "L" (grayscale) - белый внутри четырехугольника, черный снаружи
+        PIL Image в режиме "L" (grayscale) - белый внутри полигона, черный снаружи
     """
     from PIL import Image, ImageDraw
     
     mask = Image.new("L", template_size, 0)
     draw = ImageDraw.Draw(mask)
-    draw.polygon(quad, fill=255)
+    draw.polygon(polygon, fill=255)
     return mask
+
+
+# Алиас для обратной совместимости
+create_quad_mask = create_polygon_mask
 

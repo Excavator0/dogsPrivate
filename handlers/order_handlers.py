@@ -295,6 +295,7 @@ async def _archive_current_print(state: FSMContext):
             "customization": None,
             "selected_design_id": None,
             "selected_design_title": None,
+            "stickers_planned": False,
         }
     )
 
@@ -818,7 +819,9 @@ async def _show_order_summary(message: Message, state: FSMContext):
     order_label = next((label for label, code in order_types.items() if code == item), "Изделие")
     zone = zone_label(data.get("order_zone", "chest"))
     stickers_codes = data.get("stickers", [])
-    stickers_text = str(len(stickers_codes)) if stickers_codes else "0"
+    applied_stickers = data.get("applied_stickers", [])
+    stickers_total = len(applied_stickers) + len(stickers_codes)
+    stickers_text = str(stickers_total)
     customization_code = data.get("customization", "photo")
     customization_text = {
         "ready": "Готовый дизайн AIVADOG",
@@ -1325,7 +1328,8 @@ async def restore_print_bg(callback: CallbackQuery, state: FSMContext):
     await state.update_data({"bg_deleted": bg_deleted})
     zone = data.get("order_zone", "chest")
     image = image.resize(tuple(size[side]), Image.Resampling.BICUBIC)
-    base = paste(image, color, print_pos[side], item, side, angle[side], False, zone)
+    template_override = _get_template_override_path(data, side)
+    base = paste(image, color, print_pos[side], item, side, angle[side], False, zone, template_override=template_override)
     data = await state.get_data()
     base = _apply_stickers_overlay(base, data, side)
     file = image_to_bytes(base)
@@ -1407,7 +1411,8 @@ async def print_size(callback: CallbackQuery, state: FSMContext):
     if size_changed:
         size[side] = new_size
         image = image.resize(tuple(size[side]), Image.Resampling.BICUBIC)
-        base = paste(image, color, print_pos[side], item, side, angle[side], bg_deleted[side], zone)
+        template_override = _get_template_override_path(data, side)
+        base = paste(image, color, print_pos[side], item, side, angle[side], bg_deleted[side], zone, template_override=template_override)
         data = await state.get_data()
         base = _apply_stickers_overlay(base, data, side)
         file = image_to_bytes(base)
@@ -1563,7 +1568,8 @@ async def move_print(callback: CallbackQuery, state: FSMContext):
         pos_changed = True
     if pos_changed:
         image = image.resize(tuple(size[side]), Image.Resampling.BICUBIC)
-        base = paste(image, color, print_pos[side], item, side, angle[side], bg_deleted[side], zone)
+        template_override = _get_template_override_path(data, side)
+        base = paste(image, color, print_pos[side], item, side, angle[side], bg_deleted[side], zone, template_override=template_override)
         data = await state.get_data()
         base = _apply_stickers_overlay(base, data, side)
         file = image_to_bytes(base)
@@ -1611,7 +1617,8 @@ async def rotate_print(callback: CallbackQuery, state: FSMContext):
         angle[side] = angle[side] + 90
     zone = data.get("order_zone", "chest")
     image = image.resize(tuple(size[side]), Image.Resampling.BICUBIC)
-    base = paste(image, color, print_pos[side], item, side, angle[side], bg_deleted[side], zone)
+    template_override = _get_template_override_path(data, side)
+    base = paste(image, color, print_pos[side], item, side, angle[side], bg_deleted[side], zone, template_override=template_override)
     data = await state.get_data()
     base = _apply_stickers_overlay(base, data, side)
     file = image_to_bytes(base)
@@ -1734,7 +1741,8 @@ async def change_side_zone(callback: CallbackQuery, state: FSMContext):
     angle[side] = 0
 
     image = image.resize(tuple(size[side]), Image.Resampling.BICUBIC)
-    base = paste(image, color, print_pos[side], item, side, angle[side], bg_deleted[side], new_zone)
+    template_override = _get_template_override_path(data, side)
+    base = paste(image, color, print_pos[side], item, side, angle[side], bg_deleted[side], new_zone, template_override=template_override)
     data = await state.get_data()
     base = _apply_stickers_overlay(base, data, side)
     file = image_to_bytes(base)
@@ -1766,7 +1774,8 @@ async def delete_print(callback: CallbackQuery, state: FSMContext):
     else:
         print_pos[side] = "deleted"
         zone = data.get("order_zone", "chest")
-        base = paste(None, color, print_pos[side], item, side, angle[side], bg_deleted[side], zone)
+        template_override = _get_template_override_path(data, side)
+        base = paste(None, color, print_pos[side], item, side, angle[side], bg_deleted[side], zone, template_override=template_override)
         data = await state.get_data()
         base = _apply_stickers_overlay(base, data, side)
         file = image_to_bytes(base)
@@ -1810,7 +1819,8 @@ async def confirm_print(callback: CallbackQuery, state: FSMContext):
         base_image = Image.open(f"prints/{user_id}_bg_deleted.png") if bg_deleted[0] else Image.open(
             f"prints/{user_id}.png")
     image1 = base_image.resize(tuple(size[0]), Image.Resampling.BICUBIC)
-    front = paste(image1, color, print_pos[0], item, 0, angle[0], bg_deleted[0], zone)
+    template_override_front = _get_template_override_path(data, 0)
+    front = paste(image1, color, print_pos[0], item, 0, angle[0], bg_deleted[0], zone, template_override=template_override_front)
     data_for_overlay = await state.get_data()
     front = _apply_stickers_overlay(front, data_for_overlay, 0)
     file1 = InputMediaPhoto(media=image_to_bytes(front))
@@ -1831,9 +1841,17 @@ async def confirm_print(callback: CallbackQuery, state: FSMContext):
         base_back_image = Image.open(f"prints/{user_id}_bg_deleted.png") if bg_deleted[1] else Image.open(
             f"prints/{user_id}.png")
     image2 = base_back_image.resize(tuple(size[1]), Image.Resampling.BICUBIC)
-    back = paste(image2, color, print_pos[1], item, 1, angle[1], bg_deleted[1], zone)
+    template_override_back = _get_template_override_path(data, 1)
+    back = paste(image2, color, print_pos[1], item, 1, angle[1], bg_deleted[1], zone, template_override=template_override_back)
     back = _apply_stickers_overlay(back, data_for_overlay, 1)
     file2 = InputMediaPhoto(media=image_to_bytes(back))
+
+    # Сохраняем итоговые макеты как основу для следующего цикла (если он будет)
+    front_path = f"prints/{user_id}_composite_front.png"
+    back_path = f"prints/{user_id}_composite_back.png"
+    front.save(front_path, "PNG")
+    back.save(back_path, "PNG")
+    await state.update_data({"template_overrides": [front_path, back_path]})
 
     await callback.message.delete()
     try:
@@ -1993,6 +2011,7 @@ async def preview_designer(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "preview_more")
 async def preview_more(callback: CallbackQuery, state: FSMContext):
+    await _archive_current_print(state)
     data = await state.get_data()
     zones = zone_schemes.get(get_base_item(data.get("order_type")), zone_schemes["shirt"])
     await callback.message.answer("Выбери новую зону нанесения 👇", reply_markup=make_zone_keyboard(zones).as_markup())
@@ -2064,10 +2083,20 @@ async def edit_settings(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     user_id = callback.from_user.id
     bg_deleted = data["bg_deleted"]
-    if bg_deleted[0]:
-        image = Image.open(f"prints/{user_id}_bg_deleted.png")
+    customization = data.get("customization", "photo")
+    if customization == "ready" and data.get("selected_design_id"):
+        design = find_design(data["selected_design_id"])
+        from services.designs import _build_preview
+        design_path = _build_preview(design) if design else None
+        if design_path:
+            image = Image.open(design_path)
+        else:
+            image = Image.open(f"prints/{user_id}.png")
     else:
-        image = Image.open(f"prints/{user_id}.png")
+        if bg_deleted[0]:
+            image = Image.open(f"prints/{user_id}_bg_deleted.png")
+        else:
+            image = Image.open(f"prints/{user_id}.png")
     item = data["order_type"]
     color = data.get("color")
     print_pos = data["pos"]
@@ -2075,7 +2104,8 @@ async def edit_settings(callback: CallbackQuery, state: FSMContext):
     size = data["size"]
     zone = data.get("order_zone", "chest")
     image1 = image.resize(tuple(size[0]), Image.Resampling.BICUBIC)
-    base_front = paste(image1, color, print_pos[0], item, 0, angle[0], bg_deleted[0], zone)
+    template_override = _get_template_override_path(data, 0)
+    base_front = paste(image1, color, print_pos[0], item, 0, angle[0], bg_deleted[0], zone, template_override=template_override)
     base_front = _apply_stickers_overlay(base_front, data, 0)
     file = image_to_bytes(base_front)
     await callback.message.delete()
