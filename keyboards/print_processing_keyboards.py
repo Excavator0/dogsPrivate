@@ -160,10 +160,6 @@ def make_stickers_manage_keyboard(active_index, total):
         callback_data="st_rotate"
     ))
     builder.add(InlineKeyboardButton(
-        text="Сменить сторону",
-        callback_data="st_change_side"
-    ))
-    builder.add(InlineKeyboardButton(
         text="Удалить",
         callback_data="st_delete"
     ))
@@ -171,7 +167,7 @@ def make_stickers_manage_keyboard(active_index, total):
         text="Назад",
         callback_data="settings"
     ))
-    builder.adjust(2, 2, 2, 1)
+    builder.adjust(2, 2, 1, 1)
     return builder
 
 

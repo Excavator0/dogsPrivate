@@ -265,21 +265,70 @@ def _has_active_print(pos_list) -> bool:
     return False
 
 
+def _has_print_on_side(data: dict, side: int) -> bool:
+    """
+    Проверяет, есть ли принт или стикеры на указанной стороне.
+    """
+    # Проверяем позицию принта
+    pos = data.get("pos") or [[-1, -1], [-1, -1]]
+    if len(pos) > side:
+        pos_side = pos[side]
+        if isinstance(pos_side, list) and pos_side and pos_side[0] != -1:
+            return True
+    
+    # Проверяем стикеры на этой стороне
+    sticker_items = data.get("sticker_items") or []
+    for item in sticker_items:
+        if item.get("side", 0) == side:
+            return True
+    
+    return False
+
+
 async def _archive_current_print(state: FSMContext):
     """
     Переносит текущий принт/стикеры в «зафиксированные» и подготавливает данные
     для следующего цикла (после «Хочу ещё выбрать принт»).
+    
+    Сохраняет данные о принте в zone_prints[zone_code] для последующей генерации макетов.
     """
     data = await state.get_data()
-    applied_photos = data.get("applied_photos", 0)
-    if _has_active_print(data.get("pos")):
-        applied_photos += 1
-    applied_stickers = data.get("applied_stickers") or []
-    applied_stickers.extend(data.get("stickers", []))
+    zone = data.get("order_zone", "chest")
+    side = data.get("side", 0)
+    pos = data.get("pos") or [[-1, -1], [-1, -1]]
+    size = data.get("size") or [[0, 0], [0, 0]]
+    angle = data.get("angle") or [0, 0]
+    bg_deleted = data.get("bg_deleted") or [False, False]
+    sticker_items = data.get("sticker_items") or []
+    stickers = data.get("stickers") or []
+    
+    # Проверяем, есть ли что сохранять
+    has_print = isinstance(pos[side], list) and pos[side][0] != -1
+    has_stickers = bool(sticker_items)
+    
+    if has_print or has_stickers:
+        # Получаем или создаём словарь зон
+        zone_prints = data.get("zone_prints") or {}
+        
+        # Сохраняем данные о принте для этой зоны
+        zone_prints[zone] = {
+            "side": side,
+            "pos": pos[side] if has_print else [-1, -1],
+            "size": size[side],
+            "angle": angle[side],
+            "bg_deleted": bg_deleted[side],
+            "sticker_items": [item for item in sticker_items if item.get("side", 0) == side],
+            "stickers": stickers.copy(),
+            "customization": data.get("customization"),
+            "selected_design_id": data.get("selected_design_id"),
+            "selected_design_title": data.get("selected_design_title"),
+        }
+        
+        await state.update_data({"zone_prints": zone_prints})
+    
+    # Сбрасываем текущие данные для нового цикла
     await state.update_data(
         {
-            "applied_photos": applied_photos,
-            "applied_stickers": applied_stickers,
             "stickers": [],
             "sticker_items": [],
             "active_sticker_index": None,
@@ -384,6 +433,8 @@ async def cmd_start(message: Message, state: FSMContext):
         "template_overrides": [None, None],
         "applied_photos": 0,
         "applied_stickers": [],
+        "zone_prints": {},
+        "all_zones": [],
     })
 
 
@@ -587,6 +638,8 @@ async def order_size(callback: CallbackQuery, state: FSMContext):
         "template_overrides": [None, None],
         "applied_photos": 0,
         "applied_stickers": [],
+        "zone_prints": {},
+        "all_zones": [],
     })
     await callback.message.edit_text(text="Выбери размер изделия")
     await callback.message.edit_reply_markup(
@@ -624,12 +677,13 @@ async def getting_image(message: Message, state: FSMContext):
             data = await state.get_data()
             item = data["order_type"]
             zone = data.get("order_zone", "chest")
+            side = data.get("side", 0)
             with Image.open(document) as image:
                 image.save(f"prints/{user_id}.png", "PNG")
                 template_width, template_height = get_template_bounds(item)
                 
-                # Получаем границы для размещения принта
-                bounds = get_print_bounds(item, 0, zone)
+                # Получаем границы для размещения принта на нужной стороне
+                bounds = get_print_bounds(item, side, zone)
                 if bounds:
                     # Центрируем принт в пределах допустимой области
                     centre_pos = list(get_centered_position_in_bounds(
@@ -640,10 +694,14 @@ async def getting_image(message: Message, state: FSMContext):
                     centre_pos = [(template_width - image.size[0]) // 2,
                                   (template_height - image.size[1]) // 2]
                 
+                # Устанавливаем позицию на правильную сторону (side)
+                pos = [[-1, -1], [-1, -1]]
+                pos[side] = centre_pos
+                
                 await state.update_data(
                     {
-                        "pos": [centre_pos, [-1, -1]],
-                        "size": [image.size, image.size],
+                        "pos": pos,
+                        "size": [list(image.size), list(image.size)],
                         "angle": [0, 0],
                         "bg_deleted": [False, False],
                     }
@@ -794,21 +852,31 @@ async def _show_mockup_after_stickers(callback: CallbackQuery, state: FSMContext
 
 
 async def _start_sticker_flow(target, state: FSMContext):
-    data = await state.get_data()
-    item = data.get("order_type")
-    zones = [("К фото", "photo")] + zone_schemes.get(get_base_item(item), zone_schemes["shirt"])
-    text = "Выбери зону нанесения стикера:"
+    """
+    Запуск выбора стикеров — сразу показываем категории.
+    Стикеры автоматически добавляются на ту же сторону, что и принт/дизайн.
+    """
+    categories = list_sticker_categories()
+    if not categories:
+        if isinstance(target, CallbackQuery):
+            await target.answer("Стикеры скоро появятся 💛", show_alert=True)
+        else:
+            await target.answer("Стикеры скоро появятся 💛")
+        return
+
+    text = "Выбери категорию стикеров 🐾"
     if isinstance(target, Message):
-        # На всякий случай поддерживаем запуск из текстового сообщения
-        await target.answer(text, reply_markup=make_sticker_zone_keyboard(zones).as_markup())
+        await target.answer(text, reply_markup=make_sticker_categories_keyboard(categories).as_markup())
     else:
-        # Для callback работаем всегда с одним сообщением:
-        # меняем подпись и клавиатуру у текущего сообщения (с макетом или стикером)
-        await target.message.edit_caption(caption=text)
-        await target.message.edit_reply_markup(
-            reply_markup=make_sticker_zone_keyboard(zones).as_markup()
-        )
-    await state.set_state(Order.sticker_zone)
+        # Для callback работаем с текущим сообщением
+        try:
+            await target.message.edit_caption(caption=text)
+            await target.message.edit_reply_markup(
+                reply_markup=make_sticker_categories_keyboard(categories).as_markup()
+            )
+        except TelegramBadRequest:
+            pass
+    await state.set_state(Order.sticker_category)
 
 
 async def _show_order_summary(message: Message, state: FSMContext):
@@ -817,17 +885,51 @@ async def _show_order_summary(message: Message, state: FSMContext):
     item = data.get("order_type")
     size_order = data.get("order_size")
     order_label = next((label for label, code in order_types.items() if code == item), "Изделие")
-    zone = zone_label(data.get("order_zone", "chest"))
-    stickers_codes = data.get("stickers", [])
-    applied_stickers = data.get("applied_stickers", [])
-    stickers_total = len(applied_stickers) + len(stickers_codes)
-    stickers_text = str(stickers_total)
-    customization_code = data.get("customization", "photo")
-    customization_text = {
-        "ready": "Готовый дизайн AIVADOG",
-        "photo": "Фото питомца",
-        "stickers": "Фото + стикеры",
-    }.get(customization_code, "Фото питомца")
+    
+    # Получаем все зоны из zone_prints
+    zone_prints = data.get("zone_prints") or {}
+    all_zones = data.get("all_zones") or list(zone_prints.keys())
+    if not all_zones:
+        all_zones = [data.get("order_zone", "chest")]
+    
+    # Формируем текст зон
+    zones_text = ", ".join(zone_label(z) for z in all_zones)
+    
+    # Собираем все стикеры со всех зон
+    all_stickers = []
+    for zp in zone_prints.values():
+        all_stickers.extend(zp.get("stickers", []))
+    # Добавляем текущие стикеры если есть
+    all_stickers.extend(data.get("stickers", []))
+    stickers_total = len(all_stickers)
+    stickers_text = str(stickers_total) if stickers_total else "0"
+    
+    # Собираем все типы кастомизации со всех зон
+    customization_types = set()
+    design_titles = []
+    for zp in zone_prints.values():
+        cust = zp.get("customization")
+        if cust:
+            customization_types.add(cust)
+        design_title = zp.get("selected_design_title")
+        if design_title and design_title not in design_titles:
+            design_titles.append(design_title)
+    # Добавляем текущую кастомизацию
+    current_cust = data.get("customization")
+    if current_cust:
+        customization_types.add(current_cust)
+    current_design = data.get("selected_design_title")
+    if current_design and current_design not in design_titles:
+        design_titles.append(current_design)
+    
+    # Формируем текст кастомизации
+    cust_labels = []
+    if "photo" in customization_types or "stickers" in customization_types:
+        cust_labels.append("Фото питомца")
+    if "ready" in customization_types:
+        cust_labels.append("Готовый дизайн AIVADOG")
+    customization_text = ", ".join(cust_labels) if cust_labels else "Фото питомца"
+    
     pet_name = data.get("pet_name", "—")
     
     order_id = data.get("order_id")
@@ -837,12 +939,12 @@ async def _show_order_summary(message: Message, state: FSMContext):
         f"Заказ #{order_number or order_id}\n"
         f"Изделие: {order_label}\n"
         f"Размер: {size_order.upper()}\n"
-        f"Зона нанесения: {zone}\n"
+        f"Зоны нанесения: {zones_text}\n"
         f"Кастомизация: {customization_text}\n"
         f"Имя питомца: {pet_name}\n"
     )
-    if data.get("selected_design_title"):
-        summary += f"Дизайн: {data['selected_design_title']}\n"
+    if design_titles:
+        summary += f"Дизайны: {', '.join(design_titles)}\n"
     summary += (
         f"Стикеры: {stickers_text}\n\n"
         "Всё нравится?"
@@ -879,25 +981,6 @@ async def stickers_no(callback: CallbackQuery, state: FSMContext):
     await state.update_data({"stickers_planned": False})
     await callback.message.answer("Отлично! Проверь макет и нажми «Продолжить», когда всё понравится ✅")
     await state.set_state(Order.customization)
-
-
-@router.callback_query(Order.sticker_zone, F.data.startswith("sticker_zone_"))
-async def sticker_zone_selected(callback: CallbackQuery, state: FSMContext):
-    zone = callback.data.replace("sticker_zone_", "")
-    await state.update_data({"sticker_zone": zone, "stickers": [], "sticker_items": [], "active_sticker_index": None})
-
-    categories = list_sticker_categories()
-    if not categories:
-        await callback.answer("Стикеры скоро появятся 💛", show_alert=True)
-        await _start_sticker_flow(callback, state)
-        return
-
-    # Меняем текст и клавиатуру в текущем сообщении (остается прежнее изображение)
-    await callback.message.edit_caption("Выбери категорию стикеров 🐾")
-    await callback.message.edit_reply_markup(
-        reply_markup=make_sticker_categories_keyboard(categories).as_markup()
-    )
-    await state.set_state(Order.sticker_category)
 
 
 @router.callback_query(Order.sticker_category, F.data.startswith("sticker_cat_"))
@@ -1190,29 +1273,6 @@ async def sticker_rotate(callback: CallbackQuery, state: FSMContext):
     items[active] = sticker
     await state.update_data({"sticker_items": items})
     await _show_mockup_after_stickers(callback, state, reply_markup=make_sticker_rotate_keyboard().as_markup())
-    await callback.answer()
-
-
-@router.callback_query(F.data == "st_change_side")
-async def sticker_change_side(callback: CallbackQuery, state: FSMContext):
-    from keyboards.print_processing_keyboards import make_stickers_manage_keyboard
-    data = await state.get_data()
-    items = data.get("sticker_items") or []
-    active = data.get("active_sticker_index")
-    if active is None or not (0 <= active < len(items)):
-        await callback.answer("Сначала выбери стикер", show_alert=True)
-        return
-    sticker = items[active]
-    # меняем сторону и сбрасываем позицию/угол, центруем
-    new_side = 0 if sticker.get("side", 0) == 1 else 1
-    item_code = data.get("order_type")
-    template_width, template_height = get_template_bounds(item_code)
-    w, h = sticker.get("size") or [100, 100]
-    pos = [(template_width - w) // 2, (template_height - h) // 2]
-    sticker.update({"side": new_side, "pos": pos, "angle": 0})
-    items[active] = sticker
-    await state.update_data({"sticker_items": items})
-    await _show_mockup_after_stickers(callback, state, reply_markup=make_stickers_manage_keyboard(active, len(items)).as_markup())
     await callback.answer()
 
 
@@ -1784,6 +1844,83 @@ async def delete_print(callback: CallbackQuery, state: FSMContext):
         await callback.message.edit_media(file, reply_markup=make_settings_keyboard().as_markup())
 
 
+def _generate_zone_mockup(user_id: int, item: str, zone: str, zone_data: dict, color) -> Image.Image:
+    """
+    Генерирует макет для одной зоны на основе сохранённых данных.
+    """
+    side = zone_data.get("side", 0)
+    pos = zone_data.get("pos", [-1, -1])
+    size = zone_data.get("size", [0, 0])
+    angle_val = zone_data.get("angle", 0)
+    bg_deleted_val = zone_data.get("bg_deleted", False)
+    sticker_items = zone_data.get("sticker_items", [])
+    customization = zone_data.get("customization", "photo")
+    design_id = zone_data.get("selected_design_id")
+    
+    # Загружаем изображение принта
+    if customization == "ready" and design_id:
+        design = find_design(design_id)
+        from services.designs import _build_preview
+        design_path = _build_preview(design) if design else None
+        if design_path:
+            base_image = Image.open(design_path)
+        else:
+            base_image = Image.open(f"prints/{user_id}.png")
+    else:
+        if bg_deleted_val and os.path.exists(f"prints/{user_id}_bg_deleted.png"):
+            base_image = Image.open(f"prints/{user_id}_bg_deleted.png")
+        else:
+            base_image = Image.open(f"prints/{user_id}.png")
+    
+    # Если размер не задан, используем исходный
+    if not size or size[0] == 0 or size[1] == 0:
+        size = list(base_image.size)
+    
+    image = base_image.resize(tuple(size), Image.Resampling.BICUBIC)
+    
+    # Определяем позицию для paste
+    paste_pos = pos if isinstance(pos, list) and pos[0] != -1 else "deleted"
+    
+    # Генерируем макет
+    mockup = paste(image, color, paste_pos, item, side, angle_val, bg_deleted_val, zone, template_override=None)
+    
+    # Накладываем стикеры для этой зоны
+    if sticker_items:
+        mockup = _apply_stickers_to_mockup(mockup, sticker_items)
+    
+    return mockup
+
+
+def _apply_stickers_to_mockup(base_image: Image.Image, sticker_items: list) -> Image.Image:
+    """
+    Накладывает стикеры на макет.
+    """
+    if not sticker_items:
+        return base_image
+    composed = base_image.copy()
+    width, height = composed.size
+    for item in sticker_items:
+        code = item.get("code")
+        path = get_sticker_path(code)
+        if not path or not path.exists():
+            continue
+        try:
+            sticker = Image.open(path).convert("RGBA")
+        except Exception:
+            continue
+        size = item.get("size")
+        angle = int(item.get("angle", 0)) % 360
+        pos = item.get("pos") or [0, 0]
+        if size and size[0] > 0 and size[1] > 0:
+            sticker = sticker.resize(tuple(size), Image.Resampling.BICUBIC)
+        if angle:
+            sticker = sticker.rotate(angle, expand=True)
+        x = max(0, min(pos[0], width - 1))
+        y = max(0, min(pos[1], height - 1))
+        composed.paste(sticker, (x, y), sticker)
+    return composed
+
+
 @router.callback_query(F.data.startswith("confirm"))
 async def confirm_print(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
@@ -1805,78 +1942,121 @@ async def confirm_print(callback: CallbackQuery, state: FSMContext):
         elif change == "type":
             item = value
             await state.update_data({"order_type": item})
-    zone = data.get("order_zone", "chest")
+    
+    current_zone = data.get("order_zone", "chest")
     customization = data.get("customization", "photo")
-    if customization == "ready" and data.get("selected_design_id"):
-        design = find_design(data["selected_design_id"])
-        from services.designs import _build_preview
-        design_path = _build_preview(design) if design else None
-        if design_path:
-            base_image = Image.open(design_path)
-        else:
-            base_image = Image.open(f"prints/{user_id}.png")
-    else:
-        base_image = Image.open(f"prints/{user_id}_bg_deleted.png") if bg_deleted[0] else Image.open(
-            f"prints/{user_id}.png")
-    image1 = base_image.resize(tuple(size[0]), Image.Resampling.BICUBIC)
-    template_override_front = _get_template_override_path(data, 0)
-    front = paste(image1, color, print_pos[0], item, 0, angle[0], bg_deleted[0], zone, template_override=template_override_front)
-    data_for_overlay = await state.get_data()
-    front = _apply_stickers_overlay(front, data_for_overlay, 0)
-    file1 = InputMediaPhoto(media=image_to_bytes(front))
-
-    if isinstance(print_pos[1], list) and print_pos[1][0] == -1:
-        print_pos[1] = "deleted"
-
-    if customization == "ready" and data.get("selected_design_id"):
-        # тот же макет для второй стороны
-        design = find_design(data["selected_design_id"])
-        from services.designs import _build_preview
-        design_path = _build_preview(design) if design else None
-        if design_path:
-            base_back_image = Image.open(design_path)
-        else:
-            base_back_image = Image.open(f"prints/{user_id}.png")
-    else:
-        base_back_image = Image.open(f"prints/{user_id}_bg_deleted.png") if bg_deleted[1] else Image.open(
-            f"prints/{user_id}.png")
-    image2 = base_back_image.resize(tuple(size[1]), Image.Resampling.BICUBIC)
-    template_override_back = _get_template_override_path(data, 1)
-    back = paste(image2, color, print_pos[1], item, 1, angle[1], bg_deleted[1], zone, template_override=template_override_back)
-    back = _apply_stickers_overlay(back, data_for_overlay, 1)
-    file2 = InputMediaPhoto(media=image_to_bytes(back))
-
-    # Сохраняем итоговые макеты как основу для следующего цикла (если он будет)
-    front_path = f"prints/{user_id}_composite_front.png"
-    back_path = f"prints/{user_id}_composite_back.png"
-    front.save(front_path, "PNG")
-    back.save(back_path, "PNG")
-    await state.update_data({"template_overrides": [front_path, back_path]})
-
+    sticker_items = data.get("sticker_items") or []
+    
+    # Собираем все зоны: архивированные + текущая
+    zone_prints = dict(data.get("zone_prints") or {})
+    
+    # Проверяем, есть ли что-то в текущей зоне
+    has_current_print = isinstance(print_pos[side], list) and print_pos[side][0] != -1
+    has_current_stickers = bool(sticker_items)
+    
+    if has_current_print or has_current_stickers:
+        # Добавляем текущую зону
+        zone_prints[current_zone] = {
+            "side": side,
+            "pos": print_pos[side] if has_current_print else [-1, -1],
+            "size": size[side],
+            "angle": angle[side],
+            "bg_deleted": bg_deleted[side],
+            "sticker_items": [item for item in sticker_items if item.get("side", 0) == side],
+            "stickers": data.get("stickers") or [],
+            "customization": customization,
+            "selected_design_id": data.get("selected_design_id"),
+            "selected_design_title": data.get("selected_design_title"),
+        }
+    
+    # Если нет ни одной зоны — показываем пустой макет текущей зоны
+    if not zone_prints:
+        zone_prints[current_zone] = {
+            "side": side,
+            "pos": [-1, -1],
+            "size": size[side] if size[side][0] > 0 else [400, 400],
+            "angle": 0,
+            "bg_deleted": False,
+            "sticker_items": [],
+            "stickers": [],
+            "customization": customization,
+            "selected_design_id": data.get("selected_design_id"),
+            "selected_design_title": data.get("selected_design_title"),
+        }
+    
+    # Сохраняем все зоны
+    await state.update_data({"zone_prints": zone_prints})
+    
+    # Генерируем макеты для каждой зоны
+    media_files = []
+    zone_file_ids = {}
+    zone_paths = {}
+    
+    for zone_code, zone_data in zone_prints.items():
+        mockup = _generate_zone_mockup(user_id, item, zone_code, zone_data, color)
+        
+        # Сохраняем макет
+        path = f"prints/{user_id}_zone_{zone_code}.png"
+        mockup.save(path, "PNG")
+        zone_paths[zone_code] = path
+        
+        # Добавляем в список для отправки
+        media_files.append(InputMediaPhoto(media=image_to_bytes(mockup)))
+    
     await callback.message.delete()
+    
+    # Удаляем предыдущие сообщения альбома
     try:
-        album_id = data["album_id"]
+        album_id = data.get("album_id")
         chat_id = data["chat_id"]
-        if album_id != -1:
-            await callback.bot.delete_message(chat_id=chat_id, message_id=album_id)
-            await callback.bot.delete_message(chat_id=chat_id, message_id=(album_id + 1))
+        if album_id and album_id != -1:
+            # Пытаемся удалить несколько сообщений (максимум 10 для альбома)
+            for i in range(10):
+                try:
+                    await callback.bot.delete_message(chat_id=chat_id, message_id=(album_id + i))
+                except Exception:
+                    break
     except KeyError:
         pass
-    media_group = await callback.message.answer_media_group([file1, file2])
-    front_id = media_group[0].photo[-1].file_id
-    back_id = media_group[1].photo[-1].file_id
-    await state.update_data({"album_id": media_group[0].message_id, "front_id": front_id, "back_id": back_id})
+    
+    # Отправляем фото
+    if len(media_files) == 1:
+        sent_msg = await callback.message.answer_photo(media_files[0].media)
+        zone_code = list(zone_prints.keys())[0]
+        zone_file_ids[zone_code] = sent_msg.photo[-1].file_id
+        await state.update_data({
+            "album_id": sent_msg.message_id,
+            "zone_file_ids": zone_file_ids,
+            "zone_paths": zone_paths,
+        })
+    else:
+        media_group = await callback.message.answer_media_group(media_files)
+        for idx, zone_code in enumerate(zone_prints.keys()):
+            zone_file_ids[zone_code] = media_group[idx].photo[-1].file_id
+        await state.update_data({
+            "album_id": media_group[0].message_id,
+            "zone_file_ids": zone_file_ids,
+            "zone_paths": zone_paths,
+        })
     # После нажатия «Продолжить» спрашиваем имя питомца (если ещё не задано)
     # Для варианта "ready" (готовый дизайн) спрашиваем имя здесь
     if not data.get("pet_name") and data.get("customization") == "ready":
         await callback.message.answer("Фото принято ✅\nКак зовут твоего хвостика?", disable_notification=True)
         await state.set_state(Order.pet_name)
         return
+    
+    # Собираем все зоны для отображения
+    all_zones = list(zone_prints.keys())
+    zones_text = ", ".join(zone_label(z) for z in all_zones)
+    
+    # Собираем все стикеры со всех зон
+    all_stickers = []
+    for zp in zone_prints.values():
+        all_stickers.extend(zp.get("stickers", []))
+    
     order_label = next((label for label, code in order_types.items() if code == item), "Изделие")
-    zone = zone_label(data.get("order_zone", "chest"))
-    stickers_codes = data.get("stickers", [])
     titles_map = {code: text for text, code in sticker_catalog}
-    stickers_text = ", ".join(titles_map.get(code, code) for code in stickers_codes) if stickers_codes else "Без стикеров"
+    stickers_text = ", ".join(titles_map.get(code, code) for code in all_stickers) if all_stickers else "Без стикеров"
     customization_code = data.get("customization", "photo")
     customization_text = {
         "ready": "Готовый дизайн AIVADOG",
@@ -1887,7 +2067,9 @@ async def confirm_print(callback: CallbackQuery, state: FSMContext):
     # Сохраняем информацию о выбранном готовом дизайне (если он есть)
     design_id = data.get("selected_design_id")
     design_title = data.get("selected_design_title")
-    notes = {}
+    notes = {
+        "zone_prints": {z: {"stickers": zp.get("stickers", [])} for z, zp in zone_prints.items()}
+    }
     if design_id:
         notes["ready_design_id"] = design_id
     if design_title:
@@ -1904,24 +2086,24 @@ async def confirm_print(callback: CallbackQuery, state: FSMContext):
             user_db_id,
             item_code=item,
             size=size_order.upper(),
-            zone=data.get("order_zone", "chest"),
+            zone=zones_text,  # Сохраняем все зоны
             customization=customization_code,
-            stickers=stickers_codes,
-            sticker_zone=data.get("sticker_zone"),
+            stickers=all_stickers,
+            sticker_zone=None,
             pet_name=pet_name,
             notes=notes,
         )
-        await state.update_data({"order_id": order_id, "order_number": order_number})
+        await state.update_data({"order_id": order_id, "order_number": order_number, "all_zones": all_zones})
     else:
         order_number = data.get("order_number")
         storage.update_order(
             order_id,
             item_code=item,
             size=size_order.upper(),
-            zone=data.get("order_zone", "chest"),
+            zone=zones_text,  # Сохраняем все зоны
             customization=customization_code,
-            stickers=json.dumps(stickers_codes, ensure_ascii=False),
-            sticker_zone=data.get("sticker_zone"),
+            stickers=json.dumps(all_stickers, ensure_ascii=False),
+            sticker_zone=None,
             pet_name=pet_name,
         )
         # Обновляем / очищаем данные о готовом дизайне в notes_json:
@@ -1931,7 +2113,10 @@ async def confirm_print(callback: CallbackQuery, state: FSMContext):
             ready_design_id=design_id,
             ready_design_title=design_title,
         )
-    storage.attach_preview(order_id, front_id, back_id)
+        await state.update_data({"all_zones": all_zones})
+    # Сохраняем превью (первую зону как front_id для совместимости)
+    first_zone_id = zone_file_ids.get(list(zone_prints.keys())[0]) if zone_file_ids else None
+    storage.attach_preview(order_id, first_zone_id, None)
     await state.update_data({"order_id": order_id, "order_number": order_number})
 
     # Показываем итоговый summary через общую функцию
@@ -1973,34 +2158,34 @@ async def preview_designer(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     order_number = data.get("order_number", "—")
     
+    # Собираем все зоны
+    zone_prints = data.get("zone_prints") or {}
+    all_zones = data.get("all_zones") or list(zone_prints.keys())
+    zones_text = ", ".join(zone_label(z) for z in all_zones) if all_zones else "—"
+    
     text = (
         f"Новая заявка на доработку #{order_number}\n"
         f"Изделие: {next((label for label, code in order_types.items() if code == data.get('order_type')), '—')}\n"
         f"Размер: {data.get('order_size', '').upper()}\n"
+        f"Зоны: {zones_text}\n"
         f"Имя питомца: {data.get('pet_name', '—')}"
     )
     
-    front_id = data.get("front_id")
-    back_id = data.get("back_id")
+    # Получаем file_id для всех зон
+    zone_file_ids = data.get("zone_file_ids") or {}
     user_id = callback.from_user.id
     user_photo_path = f"prints/{user_id}.png"
     
     media = []
-    if front_id:
-        media.append(InputMediaPhoto(media=front_id, caption="Макет (перед)"))
-    if back_id:
-        media.append(InputMediaPhoto(media=back_id, caption="Макет (зад)"))
+    for zone_code, file_id in zone_file_ids.items():
+        if file_id:
+            media.append(InputMediaPhoto(media=file_id, caption=f"Макет: {zone_label(zone_code)}"))
     
     if os.path.exists(user_photo_path):
-        # For local file we use FSInputFile
         user_photo = FSInputFile(user_photo_path)
         media.append(InputMediaPhoto(media=user_photo, caption="Фото клиента"))
         
     if media:
-        # Set caption only for first element to avoid duplicates if we wanted one caption for group, 
-        # but here we used individual captions. Telegram might only show the first one or combine.
-        # To be safe, let's put the main text in a separate message or attached to the first photo.
-        # Let's send text first.
         await callback.bot.send_message(ADMIN_ID, text)
         await callback.bot.send_media_group(ADMIN_ID, media)
     else:
