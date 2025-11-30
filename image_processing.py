@@ -8,7 +8,7 @@ from io import BytesIO
 from aiogram.types import BufferedInputFile
 import rembg
 import numpy
-import calculate_shades
+# import calculate_shades
 
 shade_factor = 0.875
 lighter_shade_factor = 0.92
@@ -210,36 +210,36 @@ def generate_zone_masks() -> dict:
     }
 
 
-def change_print_shade(image, item):
-    """
-    Быстрая векторизованная версия применения оттенков по предрасчитанной карте.
-    Значительно быстрее прежнего построчного цикла.
-    """
-    img_rgb = image.convert("RGB")
-    np_img = numpy.array(img_rgb, dtype=numpy.uint8)  # H x W x 3
-    height, width, _ = np_img.shape
-    shade_codes = calculate_shades.arrs.get(item)
-    if shade_codes is None or len(shade_codes) != height * width:
-        return image
-
-    codes = numpy.array(shade_codes, dtype=numpy.uint8).reshape(height, width)  # H x W
-    # Используем расширенный тип, чтобы избежать переполнений при умножении
-    result = np_img.astype(numpy.uint16)
-
-    mask_light = codes == 1
-    if mask_light.any():
-        result[mask_light] = (result[mask_light] * lighter_shade_factor).clip(0, 255)
-
-    mask_shade = codes == 2
-    if mask_shade.any():
-        result[mask_shade] = (result[mask_shade] * shade_factor).clip(0, 255)
-
-    mask_black = codes == 3
-    if mask_black.any():
-        result[mask_black] = 0
-
-    out = result.astype(numpy.uint8)
-    return Image.fromarray(out, mode="RGB")
+# def change_print_shade(image, item):
+#     """
+#     Быстрая векторизованная версия применения оттенков по предрасчитанной карте.
+#     Значительно быстрее прежнего построчного цикла.
+#     """
+#     img_rgb = image.convert("RGB")
+#     np_img = numpy.array(img_rgb, dtype=numpy.uint8)  # H x W x 3
+#     height, width, _ = np_img.shape
+#     shade_codes = calculate_shades.arrs.get(item)
+#     if shade_codes is None or len(shade_codes) != height * width:
+#         return image
+#
+#     codes = numpy.array(shade_codes, dtype=numpy.uint8).reshape(height, width)  # H x W
+#     # Используем расширенный тип, чтобы избежать переполнений при умножении
+#     result = np_img.astype(numpy.uint16)
+#
+#     mask_light = codes == 1
+#     if mask_light.any():
+#         result[mask_light] = (result[mask_light] * lighter_shade_factor).clip(0, 255)
+#
+#     mask_shade = codes == 2
+#     if mask_shade.any():
+#         result[mask_shade] = (result[mask_shade] * shade_factor).clip(0, 255)
+#
+#     mask_black = codes == 3
+#     if mask_black.any():
+#         result[mask_black] = 0
+#
+#     out = result.astype(numpy.uint8)
+#     return Image.fromarray(out, mode="RGB")
 
 
 def calculate_outline(item):

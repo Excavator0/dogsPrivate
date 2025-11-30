@@ -12,7 +12,7 @@ def confirm_or_setting_keyboard():
 def checkout_or_edit_keyboard():
     builder = InlineKeyboardBuilder()
     builder.add(InlineKeyboardButton(text="Подтвердить стоимость", callback_data="checkout"))
-    builder.add(InlineKeyboardButton(text="Вернуться к редактированию", callback_data="edit"))
+    builder.add(InlineKeyboardButton(text="Вернуться", callback_data="back_to_preview"))
     return builder
 
 

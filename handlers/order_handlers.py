@@ -62,10 +62,6 @@ zone_schemes = {
         ("Левый рукав", "sleeve_left"),
         ("Правый рукав", "sleeve_right"),
     ],
-    "zip": [
-        ("Грудь", "chest"),
-        ("Спина", "back"),
-    ],
     "pants": [
         ("Перед — левая штанина", "pant_front_left"),
         ("Перед — правая штанина", "pant_front_right"),
@@ -285,12 +281,51 @@ def _has_print_on_side(data: dict, side: int) -> bool:
     return False
 
 
+def _load_user_photo(user_id: int, data: dict, side: int, for_bg_deleted: bool = False) -> Image.Image:
+    """
+    Загружает фото пользователя для текущей зоны.
+    Если для зоны сохранено отдельное фото — использует его.
+    Иначе пытается загрузить общее фото пользователя.
+    """
+    current_photo_path = data.get("current_zone_photo")
+    
+    # Для готового дизайна
+    customization = data.get("customization", "photo")
+    if customization == "ready" and data.get("selected_design_id"):
+        design = find_design(data["selected_design_id"])
+        from services.designs import _build_preview
+        design_path = _build_preview(design) if design else None
+        if design_path:
+            return Image.open(design_path)
+        elif current_photo_path and os.path.exists(current_photo_path):
+            return Image.open(current_photo_path)
+        elif os.path.exists(f"prints/{user_id}.png"):
+            return Image.open(f"prints/{user_id}.png")
+    
+    # Для обычного фото
+    if current_photo_path and os.path.exists(current_photo_path):
+        if for_bg_deleted:
+            bg_deleted_path = current_photo_path.replace(".png", "_nobg.png")
+            if os.path.exists(bg_deleted_path):
+                return Image.open(bg_deleted_path)
+        return Image.open(current_photo_path)
+    
+    # Fallback на старые пути
+    if for_bg_deleted and os.path.exists(f"prints/{user_id}_bg_deleted.png"):
+        return Image.open(f"prints/{user_id}_bg_deleted.png")
+    elif os.path.exists(f"prints/{user_id}.png"):
+        return Image.open(f"prints/{user_id}.png")
+    
+    raise FileNotFoundError(f"Не найдено фото для пользователя {user_id}")
+
+
 async def _archive_current_print(state: FSMContext):
     """
     Переносит текущий принт/стикеры в «зафиксированные» и подготавливает данные
     для следующего цикла (после «Хочу ещё выбрать принт»).
     
     Сохраняет данные о принте в zone_prints[zone_code] для последующей генерации макетов.
+    Поддерживает несколько фото/дизайнов на одной зоне — хранит список prints.
     """
     data = await state.get_data()
     zone = data.get("order_zone", "chest")
@@ -300,7 +335,6 @@ async def _archive_current_print(state: FSMContext):
     angle = data.get("angle") or [0, 0]
     bg_deleted = data.get("bg_deleted") or [False, False]
     sticker_items = data.get("sticker_items") or []
-    stickers = data.get("stickers") or []
     
     # Проверяем, есть ли что сохранять
     has_print = isinstance(pos[side], list) and pos[side][0] != -1
@@ -308,25 +342,64 @@ async def _archive_current_print(state: FSMContext):
     
     if has_print or has_stickers:
         # Получаем или создаём словарь зон
-        zone_prints = data.get("zone_prints") or {}
+        zone_prints = dict(data.get("zone_prints") or {})
         
-        # Сохраняем данные о принте для этой зоны
+        # Получаем существующие данные для этой зоны (если есть)
+        existing_zone_data = zone_prints.get(zone, {})
+        existing_prints = existing_zone_data.get("prints", [])
+        existing_sticker_items = existing_zone_data.get("sticker_items", [])
+        
+        # Текущие стикеры для этой стороны
+        current_sticker_items = [item for item in sticker_items if item.get("side", 0) == side]
+        
+        # Объединяем стикеры (добавляем новые к существующим)
+        combined_sticker_items = existing_sticker_items + current_sticker_items
+        
+        # Создаём запись о текущем принте
+        current_customization = data.get("customization")
+        if has_print:
+            current_print = {
+                "pos": pos[side],
+                "size": size[side],
+                "angle": angle[side],
+                "bg_deleted": bg_deleted[side],
+                "customization": current_customization,
+                "photo_path": data.get("current_zone_photo"),
+                "selected_design_id": data.get("selected_design_id"),
+                "selected_design_title": data.get("selected_design_title"),
+            }
+            combined_prints = existing_prints + [current_print]
+        else:
+            combined_prints = existing_prints
+        
+        # Собираем все типы кастомизации
+        customization_types = set()
+        for p in combined_prints:
+            if p.get("customization"):
+                customization_types.add(p["customization"])
+        
+        # Собираем все названия дизайнов
+        design_titles = []
+        for p in combined_prints:
+            title = p.get("selected_design_title")
+            if title and title not in design_titles:
+                design_titles.append(title)
+        
+        # Сохраняем данные для этой зоны
         zone_prints[zone] = {
             "side": side,
-            "pos": pos[side] if has_print else [-1, -1],
-            "size": size[side],
-            "angle": angle[side],
-            "bg_deleted": bg_deleted[side],
-            "sticker_items": [item for item in sticker_items if item.get("side", 0) == side],
-            "stickers": stickers.copy(),
-            "customization": data.get("customization"),
-            "selected_design_id": data.get("selected_design_id"),
-            "selected_design_title": data.get("selected_design_title"),
+            "prints": combined_prints,  # Список всех принтов на этой зоне
+            "sticker_items": combined_sticker_items,
+            "customization_types": list(customization_types),
+            "design_titles": design_titles,
+            "has_photo": any(p.get("customization") in ("photo", "stickers") for p in combined_prints),
+            "has_design": any(p.get("customization") == "ready" for p in combined_prints),
         }
         
         await state.update_data({"zone_prints": zone_prints})
     
-    # Сбрасываем текущие данные для нового цикла
+    # Сбрасываем ТОЛЬКО текущие данные для нового цикла, но НЕ удаляем zone_prints!
+    # Устанавливаем флаг что текущий принт архивирован
     await state.update_data(
         {
             "stickers": [],
@@ -345,6 +418,8 @@ async def _archive_current_print(state: FSMContext):
             "selected_design_id": None,
             "selected_design_title": None,
             "stickers_planned": False,
+            "current_zone_photo": None,
+            "current_print_archived": True,  # Флаг что текущий принт уже сохранён
         }
     )
 
@@ -400,9 +475,30 @@ class UGCSubmission(StatesGroup):
     waiting_order_number = State()
 
 
+def _cleanup_user_files(user_id: int):
+    """
+    Удаляет все файлы пользователя из папки prints при начале нового взаимодействия.
+    """
+    prints_dir = "prints"
+    if not os.path.exists(prints_dir):
+        return
+    
+    user_prefix = str(user_id)
+    for filename in os.listdir(prints_dir):
+        if filename.startswith(user_prefix):
+            try:
+                os.remove(os.path.join(prints_dir, filename))
+            except OSError:
+                pass
+
+
 @router.message(Command("menu"))
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
+    
+    # Удаляем все файлы пользователя при начале нового взаимодействия
+    _cleanup_user_files(message.from_user.id)
+    
     storage.upsert_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
     user_row = storage.get_user_by_tg(message.from_user.id)
     if user_row:
@@ -445,6 +541,9 @@ async def start_default(message: Message, state: FSMContext):
 
 @router.message(CommandStart(deep_link=True))
 async def start_with_link(message: Message, command: CommandObject, state: FSMContext):
+    # Удаляем все файлы пользователя при начале нового взаимодействия
+    _cleanup_user_files(message.from_user.id)
+    
     storage.upsert_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
     user_row = storage.get_user_by_tg(message.from_user.id)
     if user_row:
@@ -470,7 +569,8 @@ async def start_with_link(message: Message, command: CommandObject, state: FSMCo
         await cmd_start(message, state)
         return
     order_label = next((label for label, code in order_types.items() if code == args), "Изделие")
-    await state.update_data({"order_type": args, "order_label": order_label, "pos": [[-1, -1], [-1, -1]], "side": 0, "stickers": []})
+    await state.clear()
+    await state.update_data({"order_type": args, "order_label": order_label, "pos": [[-1, -1], [-1, -1]], "side": 0, "stickers": [], "zone_prints": {}})
     await message.answer(text=f"Товар: {order_label}\nТеперь выбери размер изделия", reply_markup=make_sizes_keyboard(sizes[:-1]).as_markup())
     await state.set_state(Order.order_size)
 
@@ -592,6 +692,7 @@ async def design_pick(callback: CallbackQuery, state: FSMContext):
         "selected_design_title": design.title,
         "preferred_customization": None,
         "customization": "ready",
+        "current_print_archived": False,  # Сбрасываем флаг — новый дизайн ещё не архивирован
     })
     await callback.message.delete()
     await callback.message.answer(
@@ -678,8 +779,17 @@ async def getting_image(message: Message, state: FSMContext):
             item = data["order_type"]
             zone = data.get("order_zone", "chest")
             side = data.get("side", 0)
+            
+            # Генерируем уникальный номер для этого фото (timestamp)
+            photo_id = int(time.time() * 1000) % 1000000
+            
+            # Сохраняем фото с уникальным именем: user_item_zone_photoid.png
+            # Это гарантирует что каждое загруженное фото сохраняется отдельно
+            photo_filename = f"{user_id}_{item}_{zone}_{photo_id}.png"
+            photo_path = f"prints/{photo_filename}"
+            
             with Image.open(document) as image:
-                image.save(f"prints/{user_id}.png", "PNG")
+                image.save(photo_path, "PNG")
                 template_width, template_height = get_template_bounds(item)
                 
                 # Получаем границы для размещения принта на нужной стороне
@@ -698,12 +808,19 @@ async def getting_image(message: Message, state: FSMContext):
                 pos = [[-1, -1], [-1, -1]]
                 pos[side] = centre_pos
                 
+                # Отслеживаем все загруженные фото пользователя
+                user_photos = data.get("user_photos") or {}
+                user_photos[f"{item}_{zone}"] = photo_path
+                
                 await state.update_data(
                     {
                         "pos": pos,
                         "size": [list(image.size), list(image.size)],
                         "angle": [0, 0],
                         "bg_deleted": [False, False],
+                        "current_zone_photo": photo_path,
+                        "user_photos": user_photos,
+                        "current_print_archived": False,  # Сбрасываем флаг — новое фото ещё не архивировано
                     }
                 )
 
@@ -740,6 +857,9 @@ async def _send_initial_mockup(message: Message, state: FSMContext):
     angle = data.get("angle") or [0, 0]
     size = data.get("size") or [[0, 0], [0, 0]]
     bg_deleted = data.get("bg_deleted") or [False, False]
+    
+    # Путь к фото для текущей зоны
+    current_photo_path = data.get("current_zone_photo")
 
     customization = data.get("customization", "photo")
     if customization == "ready" and data.get("selected_design_id"):
@@ -748,10 +868,23 @@ async def _send_initial_mockup(message: Message, state: FSMContext):
         design_path = _build_preview(design) if design else None
         if design_path:
             image = Image.open(design_path)
+        elif current_photo_path and os.path.exists(current_photo_path):
+            image = Image.open(current_photo_path)
         else:
             image = Image.open(f"prints/{user_id}.png")
     else:
-        if bg_deleted[side]:
+        # Используем фото для текущей зоны
+        if current_photo_path and os.path.exists(current_photo_path):
+            if bg_deleted[side]:
+                # Проверяем версию без фона
+                bg_deleted_path = current_photo_path.replace(".png", "_nobg.png")
+                if os.path.exists(bg_deleted_path):
+                    image = Image.open(bg_deleted_path)
+                else:
+                    image = Image.open(current_photo_path)
+            else:
+                image = Image.open(current_photo_path)
+        elif bg_deleted[side] and os.path.exists(f"prints/{user_id}_bg_deleted.png"):
             image = Image.open(f"prints/{user_id}_bg_deleted.png")
         else:
             image = Image.open(f"prints/{user_id}.png")
@@ -762,7 +895,14 @@ async def _send_initial_mockup(message: Message, state: FSMContext):
 
     image = image.resize(tuple(size[side]), Image.Resampling.BICUBIC)
     template_override = _get_template_override_path(data, side)
-    base = paste(image, color, print_pos[side], item, side, angle[side], bg_deleted[side], zone, template_override=template_override)
+    
+    # Сначала накладываем архивные принты на пустой шаблон
+    base = paste(None, color, "deleted", item, side, 0, False, zone, template_override=template_override)
+    base = _apply_archived_prints_overlay(base, data, item, zone, side, color)
+    
+    # Затем накладываем текущее фото поверх
+    base = _overlay_current_print(base, image, print_pos[side], angle[side], item, side, zone)
+    
     base = _apply_stickers_overlay(base, data, side)
     file = image_to_bytes(base)
     await message.answer_photo(file, reply_markup=confirm_or_setting_keyboard().as_markup())
@@ -803,6 +943,130 @@ def _apply_stickers_overlay(base_image: Image.Image, data: dict, side: int) -> I
     return composed
 
 
+def _overlay_current_print(base_image: Image.Image, print_image: Image.Image, pos, angle_val: int, item: str, side: int, zone: str) -> Image.Image:
+    """
+    Накладывает текущее фото/дизайн на макет с обрезкой по границам зоны.
+    """
+    if pos == "deleted" or (isinstance(pos, list) and pos[0] == -1):
+        return base_image
+    
+    from print_bounds import get_print_bounds, create_quad_mask
+    bounds_quad = get_print_bounds(item, side, zone)
+    zone_mask = create_quad_mask(base_image.size, bounds_quad) if bounds_quad else None
+    
+    composed = base_image.copy().convert("RGBA")
+    
+    # Поворачиваем если нужно
+    if angle_val:
+        print_image = print_image.rotate(angle_val, expand=True)
+    
+    # Создаём слой для принта
+    print_image = print_image.convert("RGBA")
+    print_layer = Image.new("RGBA", composed.size, (0, 0, 0, 0))
+    print_layer.paste(print_image, tuple(pos), print_image)
+    
+    # Применяем маску зоны для обрезки
+    if zone_mask:
+        masked_layer = Image.new("RGBA", composed.size, (0, 0, 0, 0))
+        masked_layer.paste(print_layer, (0, 0), zone_mask)
+        print_layer = masked_layer
+    
+    # Накладываем на макет
+    return Image.alpha_composite(composed, print_layer)
+
+
+def _apply_archived_prints_overlay(base_image: Image.Image, data: dict, item: str, zone: str, side: int, color) -> Image.Image:
+    """
+    Накладывает ранее сохранённые принты (из zone_prints) на макет.
+    Используется в редакторе, чтобы показывать предыдущие фото/дизайны при добавлении новых.
+    """
+    zone_prints = data.get("zone_prints") or {}
+    zone_data = zone_prints.get(zone)
+    
+    if not zone_data:
+        return base_image
+    
+    prints = zone_data.get("prints", [])
+    if not prints:
+        return base_image
+    
+    # Получаем маску для обрезки по границам зоны
+    from print_bounds import get_print_bounds, create_quad_mask
+    bounds_quad = get_print_bounds(item, side, zone)
+    zone_mask = create_quad_mask(base_image.size, bounds_quad) if bounds_quad else None
+    
+    composed = base_image.copy().convert("RGBA")
+    
+    for print_data in prints:
+        pos = print_data.get("pos", [-1, -1])
+        size = print_data.get("size", [0, 0])
+        angle_val = print_data.get("angle", 0)
+        bg_deleted_val = print_data.get("bg_deleted", False)
+        customization = print_data.get("customization", "photo")
+        design_id = print_data.get("selected_design_id")
+        photo_path = print_data.get("photo_path")
+        
+        # Пропускаем если позиция не задана
+        if not isinstance(pos, list) or pos[0] == -1:
+            continue
+        
+        # Загружаем изображение
+        print_image = None
+        if customization == "ready" and design_id:
+            design = find_design(design_id)
+            from services.designs import _build_preview
+            design_path = _build_preview(design) if design else None
+            if design_path and os.path.exists(design_path):
+                print_image = Image.open(design_path)
+            elif photo_path and os.path.exists(photo_path):
+                print_image = Image.open(photo_path)
+        else:
+            if photo_path and os.path.exists(photo_path):
+                if bg_deleted_val:
+                    bg_deleted_path = photo_path.replace(".png", "_nobg.png")
+                    if os.path.exists(bg_deleted_path):
+                        print_image = Image.open(bg_deleted_path)
+                    else:
+                        print_image = Image.open(photo_path)
+                else:
+                    print_image = Image.open(photo_path)
+        
+        if print_image is None:
+            continue
+        
+        # Если размер не задан, используем исходный
+        if not size or size[0] == 0 or size[1] == 0:
+            size = list(print_image.size)
+        
+        # Изменяем размер
+        print_image = print_image.resize(tuple(size), Image.Resampling.BICUBIC)
+        
+        # Поворачиваем если нужно
+        if angle_val:
+            print_image = print_image.rotate(angle_val, expand=True)
+        
+        # Создаём слой для принта
+        print_image = print_image.convert("RGBA")
+        print_layer = Image.new("RGBA", composed.size, (0, 0, 0, 0))
+        print_layer.paste(print_image, tuple(pos), print_image)
+        
+        # Применяем маску зоны для обрезки
+        if zone_mask:
+            masked_layer = Image.new("RGBA", composed.size, (0, 0, 0, 0))
+            masked_layer.paste(print_layer, (0, 0), zone_mask)
+            print_layer = masked_layer
+        
+        # Накладываем на макет
+        composed = Image.alpha_composite(composed, print_layer)
+    
+    # Накладываем стикеры из архива
+    archived_sticker_items = zone_data.get("sticker_items", [])
+    if archived_sticker_items:
+        composed = _apply_stickers_to_mockup(composed, archived_sticker_items)
+    
+    return composed
+
+
 async def _show_mockup_after_stickers(callback: CallbackQuery, state: FSMContext, reply_markup=None):
     """
     Восстанавливает макет в том же сообщении после работы со стикерами.
@@ -818,6 +1082,9 @@ async def _show_mockup_after_stickers(callback: CallbackQuery, state: FSMContext
     angle = data.get("angle") or [0, 0]
     size = data.get("size") or [[0, 0], [0, 0]]
     bg_deleted = data.get("bg_deleted") or [False, False]
+    
+    # Путь к фото для текущей зоны
+    current_photo_path = data.get("current_zone_photo")
 
     customization = data.get("customization", "photo")
     if customization == "ready" and data.get("selected_design_id"):
@@ -826,10 +1093,22 @@ async def _show_mockup_after_stickers(callback: CallbackQuery, state: FSMContext
         design_path = _build_preview(design) if design else None
         if design_path:
             image = Image.open(design_path)
+        elif current_photo_path and os.path.exists(current_photo_path):
+            image = Image.open(current_photo_path)
         else:
             image = Image.open(f"prints/{user_id}.png")
     else:
-        if bg_deleted[side]:
+        # Используем фото для текущей зоны
+        if current_photo_path and os.path.exists(current_photo_path):
+            if bg_deleted[side]:
+                bg_deleted_path = current_photo_path.replace(".png", "_nobg.png")
+                if os.path.exists(bg_deleted_path):
+                    image = Image.open(bg_deleted_path)
+                else:
+                    image = Image.open(current_photo_path)
+            else:
+                image = Image.open(current_photo_path)
+        elif bg_deleted[side] and os.path.exists(f"prints/{user_id}_bg_deleted.png"):
             image = Image.open(f"prints/{user_id}_bg_deleted.png")
         else:
             image = Image.open(f"prints/{user_id}.png")
@@ -839,7 +1118,14 @@ async def _show_mockup_after_stickers(callback: CallbackQuery, state: FSMContext
 
     image = image.resize(tuple(size[side]), Image.Resampling.BICUBIC)
     template_override = _get_template_override_path(data, side)
-    base = paste(image, color, print_pos[side], item, side, angle[side], bg_deleted[side], zone, template_override=template_override)
+    
+    # Сначала накладываем архивные принты на пустой шаблон
+    base = paste(None, color, "deleted", item, side, 0, False, zone, template_override=template_override)
+    base = _apply_archived_prints_overlay(base, data, item, zone, side, color)
+    
+    # Затем накладываем текущее фото поверх
+    base = _overlay_current_print(base, image, print_pos[side], angle[side], item, side, zone)
+    
     base = _apply_stickers_overlay(base, data, side)
     file = image_to_bytes(base)
     media = InputMediaPhoto(media=file, caption=None)
@@ -879,7 +1165,7 @@ async def _start_sticker_flow(target, state: FSMContext):
     await state.set_state(Order.sticker_category)
 
 
-async def _show_order_summary(message: Message, state: FSMContext):
+async def _show_order_summary(message: Message, state: FSMContext, edit: bool = False):
     """Показывает итоговую информацию о заказе после confirm"""
     data = await state.get_data()
     item = data.get("order_type")
@@ -895,25 +1181,34 @@ async def _show_order_summary(message: Message, state: FSMContext):
     # Формируем текст зон
     zones_text = ", ".join(zone_label(z) for z in all_zones)
     
-    # Собираем все стикеры со всех зон
-    all_stickers = []
+    # Собираем все стикеры со всех зон — используем sticker_items для точного подсчёта
+    stickers_total = 0
     for zp in zone_prints.values():
-        all_stickers.extend(zp.get("stickers", []))
-    # Добавляем текущие стикеры если есть
-    all_stickers.extend(data.get("stickers", []))
-    stickers_total = len(all_stickers)
+        # Считаем по sticker_items — это точное количество добавленных стикеров
+        zone_sticker_items = zp.get("sticker_items", [])
+        stickers_total += len(zone_sticker_items)
+    
+    # НЕ добавляем current_sticker_items — они уже в zone_prints после confirm
     stickers_text = str(stickers_total) if stickers_total else "0"
     
     # Собираем все типы кастомизации со всех зон
     customization_types = set()
     design_titles = []
     for zp in zone_prints.values():
-        cust = zp.get("customization")
-        if cust:
-            customization_types.add(cust)
-        design_title = zp.get("selected_design_title")
-        if design_title and design_title not in design_titles:
-            design_titles.append(design_title)
+        # Проверяем сохранённые типы кастомизации
+        zone_cust_types = zp.get("customization_types", [])
+        for ct in zone_cust_types:
+            customization_types.add(ct)
+        # Проверяем флаги has_photo и has_design
+        if zp.get("has_photo"):
+            customization_types.add("photo")
+        if zp.get("has_design"):
+            customization_types.add("ready")
+        # Берём design_titles из нового формата
+        zone_design_titles = zp.get("design_titles", [])
+        for title in zone_design_titles:
+            if title and title not in design_titles:
+                design_titles.append(title)
     # Добавляем текущую кастомизацию
     current_cust = data.get("customization")
     if current_cust:
@@ -922,12 +1217,30 @@ async def _show_order_summary(message: Message, state: FSMContext):
     if current_design and current_design not in design_titles:
         design_titles.append(current_design)
     
-    # Формируем текст кастомизации
+    # Подсчитываем количество фото и дизайнов
+    photo_count = 0
+    design_count = 0
+    for zp in zone_prints.values():
+        prints = zp.get("prints", [])
+        for p in prints:
+            cust = p.get("customization", "photo")
+            if cust == "ready":
+                design_count += 1
+            else:
+                photo_count += 1
+    
+    # Формируем текст кастомизации с количеством
     cust_labels = []
-    if "photo" in customization_types or "stickers" in customization_types:
-        cust_labels.append("Фото питомца")
-    if "ready" in customization_types:
-        cust_labels.append("Готовый дизайн AIVADOG")
+    if photo_count > 0:
+        label = "Фото питомца"
+        if photo_count > 1:
+            label += f" ×{photo_count}"
+        cust_labels.append(label)
+    if design_count > 0:
+        label = "Готовый дизайн AIVADOG"
+        if design_count > 1:
+            label += f" ×{design_count}"
+        cust_labels.append(label)
     customization_text = ", ".join(cust_labels) if cust_labels else "Фото питомца"
     
     pet_name = data.get("pet_name", "—")
@@ -936,7 +1249,7 @@ async def _show_order_summary(message: Message, state: FSMContext):
     order_number = data.get("order_number")
     
     summary = (
-        f"Заказ #{order_number or order_id}\n"
+        f"Заказ #{order_number or order_id}\n\n"
         f"Изделие: {order_label}\n"
         f"Размер: {size_order.upper()}\n"
         f"Зоны нанесения: {zones_text}\n"
@@ -944,12 +1257,18 @@ async def _show_order_summary(message: Message, state: FSMContext):
         f"Имя питомца: {pet_name}\n"
     )
     if design_titles:
-        summary += f"Дизайны: {', '.join(design_titles)}\n"
+        summary += f"Дизайн: {', '.join(design_titles)}\n"
     summary += (
         f"Стикеры: {stickers_text}\n\n"
         "Всё нравится?"
     )
-    await message.answer(summary, reply_markup=final_preview_keyboard().as_markup())
+    if edit:
+        try:
+            await message.edit_text(summary, reply_markup=final_preview_keyboard().as_markup())
+        except TelegramBadRequest:
+            await message.answer(summary, reply_markup=final_preview_keyboard().as_markup())
+    else:
+        await message.answer(summary, reply_markup=final_preview_keyboard().as_markup())
 
 
 @router.message(Order.pet_name)
@@ -1111,6 +1430,12 @@ async def stickers_manage(callback: CallbackQuery, state: FSMContext):
     active = data.get("active_sticker_index")
     await _show_mockup_after_stickers(callback, state, reply_markup=make_stickers_manage_keyboard(active, len(items)).as_markup())
     await callback.answer()
+
+
+@router.callback_query(F.data == "st_add_new")
+async def sticker_add_new(callback: CallbackQuery, state: FSMContext):
+    """Добавление нового стикера из меню редактирования — переход к выбору категории."""
+    await _start_sticker_flow(callback, state)
 
 
 @router.callback_query(F.data == "st_select")
@@ -1319,7 +1644,18 @@ async def stickers_done(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "stickers_back")
 async def stickers_back(callback: CallbackQuery, state: FSMContext):
-    # Возвращаемся к выбору зоны в этом же сообщении
+    """
+    Возвращаемся назад из выбора стикеров.
+    Если мы в категориях — возвращаемся к макету.
+    Если мы в просмотре стикеров — возвращаемся к категориям.
+    """
+    current_state = await state.get_state()
+    # Если мы на этапе выбора категорий — возвращаемся к макету
+    if current_state == Order.sticker_category.state:
+        await _show_mockup_after_stickers(callback, state)
+        await callback.answer()
+        return
+    # Если мы на этапе выбора стикера — возвращаемся к категориям
     await _start_sticker_flow(callback, state)
 
 
@@ -1345,7 +1681,14 @@ async def print_settings(callback: CallbackQuery):
 async def remove_print_bg(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     user_id = callback.from_user.id
-    image = Image.open(f"prints/{user_id}.png")
+    current_photo_path = data.get("current_zone_photo")
+    
+    # Загружаем оригинальное фото
+    if current_photo_path and os.path.exists(current_photo_path):
+        image = Image.open(current_photo_path)
+    else:
+        image = Image.open(f"prints/{user_id}.png")
+    
     item = data["order_type"]
     template_width, template_height = get_template_bounds(item)
     color = data.get("color")
@@ -1361,11 +1704,22 @@ async def remove_print_bg(callback: CallbackQuery, state: FSMContext):
         await state.update_data({"bg_deleted": bg_deleted})
         image = image.resize(tuple(size[side]), Image.Resampling.BICUBIC)
         image = print_remove_bg(image)
-        image.save(f"prints/{user_id}_bg_deleted.png", "PNG")
+        
+        # Сохраняем версию без фона рядом с оригиналом
+        if current_photo_path:
+            bg_deleted_path = current_photo_path.replace(".png", "_nobg.png")
+        else:
+            bg_deleted_path = f"prints/{user_id}_bg_deleted.png"
+        image.save(bg_deleted_path, "PNG")
+        
         zone = data.get("order_zone", "chest")
         template_override = _get_template_override_path(data, side)
-        base = paste(image, color, print_pos[side], item, side, angle[side], True, zone, template_override=template_override)
+        
+        # Сначала архивные, потом текущее фото
+        base = paste(None, color, "deleted", item, side, 0, False, zone, template_override=template_override)
         data = await state.get_data()
+        base = _apply_archived_prints_overlay(base, data, item, zone, side, color)
+        base = _overlay_current_print(base, image, print_pos[side], angle[side], item, side, zone)
         base = _apply_stickers_overlay(base, data, side)
         file = image_to_bytes(base)
         file = InputMediaPhoto(media=file)
@@ -1376,7 +1730,14 @@ async def remove_print_bg(callback: CallbackQuery, state: FSMContext):
 async def restore_print_bg(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     user_id = callback.from_user.id
-    image = Image.open(f"prints/{user_id}.png")
+    current_photo_path = data.get("current_zone_photo")
+    
+    # Загружаем оригинальное фото (без удалённого фона)
+    if current_photo_path and os.path.exists(current_photo_path):
+        image = Image.open(current_photo_path)
+    else:
+        image = Image.open(f"prints/{user_id}.png")
+    
     item = data["order_type"]
     color = data.get("color")
     side = data["side"]
@@ -1389,8 +1750,12 @@ async def restore_print_bg(callback: CallbackQuery, state: FSMContext):
     zone = data.get("order_zone", "chest")
     image = image.resize(tuple(size[side]), Image.Resampling.BICUBIC)
     template_override = _get_template_override_path(data, side)
-    base = paste(image, color, print_pos[side], item, side, angle[side], False, zone, template_override=template_override)
+    
+    # Сначала архивные, потом текущее фото
+    base = paste(None, color, "deleted", item, side, 0, False, zone, template_override=template_override)
     data = await state.get_data()
+    base = _apply_archived_prints_overlay(base, data, item, zone, side, color)
+    base = _overlay_current_print(base, image, print_pos[side], angle[side], item, side, zone)
     base = _apply_stickers_overlay(base, data, side)
     file = image_to_bytes(base)
     file = InputMediaPhoto(media=file)
@@ -1408,20 +1773,13 @@ async def print_size(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     bg_deleted = data["bg_deleted"]
     side = data["side"]
-    customization = data.get("customization", "photo")
-    if customization == "ready" and data.get("selected_design_id"):
-        design = find_design(data["selected_design_id"])
-        from services.designs import _build_preview
-        design_path = _build_preview(design) if design else None
-        if design_path:
-            image = Image.open(design_path)
-        else:
-            image = Image.open(f"prints/{user_id}.png")
-    else:
-        if bg_deleted[side]:
-            image = Image.open(f"prints/{user_id}_bg_deleted.png")
-        else:
-            image = Image.open(f"prints/{user_id}.png")
+    
+    try:
+        image = _load_user_photo(user_id, data, side, for_bg_deleted=bg_deleted[side])
+    except FileNotFoundError:
+        await callback.answer("Фото не найдено", show_alert=True)
+        return
+    
     item = data["order_type"]
     zone = data.get("order_zone", "chest")
     template_width, template_height = get_template_bounds(item)
@@ -1472,8 +1830,12 @@ async def print_size(callback: CallbackQuery, state: FSMContext):
         size[side] = new_size
         image = image.resize(tuple(size[side]), Image.Resampling.BICUBIC)
         template_override = _get_template_override_path(data, side)
-        base = paste(image, color, print_pos[side], item, side, angle[side], bg_deleted[side], zone, template_override=template_override)
+        
+        # Сначала архивные, потом текущее фото
+        base = paste(None, color, "deleted", item, side, 0, False, zone, template_override=template_override)
         data = await state.get_data()
+        base = _apply_archived_prints_overlay(base, data, item, zone, side, color)
+        base = _overlay_current_print(base, image, print_pos[side], angle[side], item, side, zone)
         base = _apply_stickers_overlay(base, data, side)
         file = image_to_bytes(base)
         await state.update_data({"size": size})
@@ -1492,20 +1854,13 @@ async def move_print(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     bg_deleted = data["bg_deleted"]
     side = data["side"]
-    customization = data.get("customization", "photo")
-    if customization == "ready" and data.get("selected_design_id"):
-        design = find_design(data["selected_design_id"])
-        from services.designs import _build_preview
-        design_path = _build_preview(design) if design else None
-        if design_path:
-            image = Image.open(design_path)
-        else:
-            image = Image.open(f"prints/{user_id}.png")
-    else:
-        if bg_deleted[side]:
-            image = Image.open(f"prints/{user_id}_bg_deleted.png")
-        else:
-            image = Image.open(f"prints/{user_id}.png")
+    
+    try:
+        image = _load_user_photo(user_id, data, side, for_bg_deleted=bg_deleted[side])
+    except FileNotFoundError:
+        await callback.answer("Фото не найдено", show_alert=True)
+        return
+    
     item = data["order_type"]
     zone = data.get("order_zone", "chest")
     template_width, template_height = get_template_bounds(item)
@@ -1629,8 +1984,12 @@ async def move_print(callback: CallbackQuery, state: FSMContext):
     if pos_changed:
         image = image.resize(tuple(size[side]), Image.Resampling.BICUBIC)
         template_override = _get_template_override_path(data, side)
-        base = paste(image, color, print_pos[side], item, side, angle[side], bg_deleted[side], zone, template_override=template_override)
+        
+        # Сначала архивные, потом текущее фото
+        base = paste(None, color, "deleted", item, side, 0, False, zone, template_override=template_override)
         data = await state.get_data()
+        base = _apply_archived_prints_overlay(base, data, item, zone, side, color)
+        base = _overlay_current_print(base, image, print_pos[side], angle[side], item, side, zone)
         base = _apply_stickers_overlay(base, data, side)
         file = image_to_bytes(base)
         await state.update_data({"pos": print_pos})
@@ -1652,20 +2011,13 @@ async def rotate_print(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     bg_deleted = data["bg_deleted"]
     side = data["side"]
-    customization = data.get("customization", "photo")
-    if customization == "ready" and data.get("selected_design_id"):
-        design = find_design(data["selected_design_id"])
-        from services.designs import _build_preview
-        design_path = _build_preview(design) if design else None
-        if design_path:
-            image = Image.open(design_path)
-        else:
-            image = Image.open(f"prints/{user_id}.png")
-    else:
-        if bg_deleted[side]:
-            image = Image.open(f"prints/{user_id}_bg_deleted.png")
-        else:
-            image = Image.open(f"prints/{user_id}.png")
+    
+    try:
+        image = _load_user_photo(user_id, data, side, for_bg_deleted=bg_deleted[side])
+    except FileNotFoundError:
+        await callback.answer("Фото не найдено", show_alert=True)
+        return
+    
     item = data["order_type"]
     color = data.get("color")
     print_pos = data["pos"]
@@ -1678,8 +2030,12 @@ async def rotate_print(callback: CallbackQuery, state: FSMContext):
     zone = data.get("order_zone", "chest")
     image = image.resize(tuple(size[side]), Image.Resampling.BICUBIC)
     template_override = _get_template_override_path(data, side)
-    base = paste(image, color, print_pos[side], item, side, angle[side], bg_deleted[side], zone, template_override=template_override)
+    
+    # Сначала архивные, потом текущее фото
+    base = paste(None, color, "deleted", item, side, 0, False, zone, template_override=template_override)
     data = await state.get_data()
+    base = _apply_archived_prints_overlay(base, data, item, zone, side, color)
+    base = _overlay_current_print(base, image, print_pos[side], angle[side], item, side, zone)
     base = _apply_stickers_overlay(base, data, side)
     file = image_to_bytes(base)
     await state.update_data({"angle": angle})
@@ -1766,20 +2122,11 @@ async def change_side_zone(callback: CallbackQuery, state: FSMContext):
         print_pos[old_side] = "deleted"
 
     # Открываем исходное изображение пользователя / дизайн
-    customization = data.get("customization", "photo")
-    if customization == "ready" and data.get("selected_design_id"):
-        design = find_design(data["selected_design_id"])
-        from services.designs import _build_preview  # внутренний, но подходит
-        design_path = _build_preview(design) if design else None
-        if design_path:
-            image = Image.open(design_path)
-        else:
-            image = Image.open(f"prints/{user_id}.png")
-    else:
-        if bg_deleted[side]:
-            image = Image.open(f"prints/{user_id}_bg_deleted.png")
-        else:
-            image = Image.open(f"prints/{user_id}.png")
+    try:
+        image = _load_user_photo(user_id, data, side, for_bg_deleted=bg_deleted[side])
+    except FileNotFoundError:
+        await callback.answer("Фото не найдено", show_alert=True)
+        return
 
     template_width, template_height = get_template_bounds(item)
 
@@ -1802,8 +2149,12 @@ async def change_side_zone(callback: CallbackQuery, state: FSMContext):
 
     image = image.resize(tuple(size[side]), Image.Resampling.BICUBIC)
     template_override = _get_template_override_path(data, side)
-    base = paste(image, color, print_pos[side], item, side, angle[side], bg_deleted[side], new_zone, template_override=template_override)
+    
+    # Сначала архивные, потом текущее фото
+    base = paste(None, color, "deleted", item, side, 0, False, new_zone, template_override=template_override)
     data = await state.get_data()
+    base = _apply_archived_prints_overlay(base, data, item, new_zone, side, color)
+    base = _overlay_current_print(base, image, print_pos[side], angle[side], item, side, new_zone)
     base = _apply_stickers_overlay(base, data, side)
     file = image_to_bytes(base)
     media = InputMediaPhoto(media=file)
@@ -1837,6 +2188,7 @@ async def delete_print(callback: CallbackQuery, state: FSMContext):
         template_override = _get_template_override_path(data, side)
         base = paste(None, color, print_pos[side], item, side, angle[side], bg_deleted[side], zone, template_override=template_override)
         data = await state.get_data()
+        base = _apply_archived_prints_overlay(base, data, item, zone, side, color)
         base = _apply_stickers_overlay(base, data, side)
         file = image_to_bytes(base)
         file = InputMediaPhoto(media=file)
@@ -1847,42 +2199,106 @@ async def delete_print(callback: CallbackQuery, state: FSMContext):
 def _generate_zone_mockup(user_id: int, item: str, zone: str, zone_data: dict, color) -> Image.Image:
     """
     Генерирует макет для одной зоны на основе сохранённых данных.
+    Поддерживает несколько принтов на одной зоне.
+    Использует маски для обрезки по границам зоны.
     """
     side = zone_data.get("side", 0)
-    pos = zone_data.get("pos", [-1, -1])
-    size = zone_data.get("size", [0, 0])
-    angle_val = zone_data.get("angle", 0)
-    bg_deleted_val = zone_data.get("bg_deleted", False)
     sticker_items = zone_data.get("sticker_items", [])
-    customization = zone_data.get("customization", "photo")
-    design_id = zone_data.get("selected_design_id")
     
-    # Загружаем изображение принта
-    if customization == "ready" and design_id:
-        design = find_design(design_id)
-        from services.designs import _build_preview
-        design_path = _build_preview(design) if design else None
-        if design_path:
-            base_image = Image.open(design_path)
+    # Новый формат: список принтов
+    prints = zone_data.get("prints", [])
+    
+    # Если нет принтов в новом формате, проверяем старый формат (для совместимости)
+    if not prints:
+        pos = zone_data.get("pos", [-1, -1])
+        size = zone_data.get("size", [0, 0])
+        angle_val = zone_data.get("angle", 0)
+        bg_deleted_val = zone_data.get("bg_deleted", False)
+        customization = zone_data.get("customization", "photo")
+        design_id = zone_data.get("selected_design_id")
+        zone_photo_path = zone_data.get("photo_path")
+        
+        if isinstance(pos, list) and pos[0] != -1:
+            prints = [{
+                "pos": pos,
+                "size": size,
+                "angle": angle_val,
+                "bg_deleted": bg_deleted_val,
+                "customization": customization,
+                "photo_path": zone_photo_path,
+                "selected_design_id": design_id,
+            }]
+    
+    # Начинаем с пустого шаблона
+    mockup = paste(None, color, "deleted", item, side, 0, False, zone, template_override=None)
+    
+    # Получаем маску для обрезки по границам зоны
+    from print_bounds import get_print_bounds, create_quad_mask
+    bounds_quad = get_print_bounds(item, side, zone)
+    zone_mask = create_quad_mask(mockup.size, bounds_quad) if bounds_quad else None
+    
+    # Накладываем каждый принт
+    for print_data in prints:
+        pos = print_data.get("pos", [-1, -1])
+        size = print_data.get("size", [0, 0])
+        angle_val = print_data.get("angle", 0)
+        bg_deleted_val = print_data.get("bg_deleted", False)
+        customization = print_data.get("customization", "photo")
+        design_id = print_data.get("selected_design_id")
+        photo_path = print_data.get("photo_path")
+        
+        # Пропускаем если позиция не задана
+        if not isinstance(pos, list) or pos[0] == -1:
+            continue
+        
+        # Загружаем изображение
+        print_image = None
+        if customization == "ready" and design_id:
+            design = find_design(design_id)
+            from services.designs import _build_preview
+            design_path = _build_preview(design) if design else None
+            if design_path and os.path.exists(design_path):
+                print_image = Image.open(design_path)
+            elif photo_path and os.path.exists(photo_path):
+                print_image = Image.open(photo_path)
         else:
-            base_image = Image.open(f"prints/{user_id}.png")
-    else:
-        if bg_deleted_val and os.path.exists(f"prints/{user_id}_bg_deleted.png"):
-            base_image = Image.open(f"prints/{user_id}_bg_deleted.png")
-        else:
-            base_image = Image.open(f"prints/{user_id}.png")
-    
-    # Если размер не задан, используем исходный
-    if not size or size[0] == 0 or size[1] == 0:
-        size = list(base_image.size)
-    
-    image = base_image.resize(tuple(size), Image.Resampling.BICUBIC)
-    
-    # Определяем позицию для paste
-    paste_pos = pos if isinstance(pos, list) and pos[0] != -1 else "deleted"
-    
-    # Генерируем макет
-    mockup = paste(image, color, paste_pos, item, side, angle_val, bg_deleted_val, zone, template_override=None)
+            if photo_path and os.path.exists(photo_path):
+                if bg_deleted_val:
+                    bg_deleted_path = photo_path.replace(".png", "_nobg.png")
+                    if os.path.exists(bg_deleted_path):
+                        print_image = Image.open(bg_deleted_path)
+                    else:
+                        print_image = Image.open(photo_path)
+                else:
+                    print_image = Image.open(photo_path)
+        
+        if print_image is None:
+            continue
+        
+        # Если размер не задан, используем исходный
+        if not size or size[0] == 0 or size[1] == 0:
+            size = list(print_image.size)
+        
+        # Изменяем размер
+        print_image = print_image.resize(tuple(size), Image.Resampling.BICUBIC)
+        
+        # Поворачиваем если нужно
+        if angle_val:
+            print_image = print_image.rotate(angle_val, expand=True)
+        
+        # Создаём слой для принта
+        print_image = print_image.convert("RGBA")
+        print_layer = Image.new("RGBA", mockup.size, (0, 0, 0, 0))
+        print_layer.paste(print_image, tuple(pos), print_image)
+        
+        # Применяем маску зоны для обрезки
+        if zone_mask:
+            masked_layer = Image.new("RGBA", mockup.size, (0, 0, 0, 0))
+            masked_layer.paste(print_layer, (0, 0), zone_mask)
+            print_layer = masked_layer
+        
+        # Накладываем на макет
+        mockup = Image.alpha_composite(mockup.convert("RGBA"), print_layer)
     
     # Накладываем стикеры для этой зоны
     if sticker_items:
@@ -1954,34 +2370,68 @@ async def confirm_print(callback: CallbackQuery, state: FSMContext):
     has_current_print = isinstance(print_pos[side], list) and print_pos[side][0] != -1
     has_current_stickers = bool(sticker_items)
     
+    # Проверяем, был ли текущий принт уже архивирован (через "Хочу ещё выбрать принт")
+    current_print_archived = data.get("current_print_archived", False)
+    
     if has_current_print or has_current_stickers:
-        # Добавляем текущую зону
+        # Получаем существующие данные для этой зоны
+        existing_zone_data = zone_prints.get(current_zone, {})
+        existing_prints = existing_zone_data.get("prints", [])
+        existing_sticker_items = existing_zone_data.get("sticker_items", [])
+        
+        # Текущие стикеры для этой стороны (добавляем только если не архивированы)
+        if not current_print_archived:
+            current_sticker_items = [item for item in sticker_items if item.get("side", 0) == side]
+            combined_sticker_items = existing_sticker_items + current_sticker_items
+        else:
+            combined_sticker_items = existing_sticker_items
+        
+        # Создаём запись о текущем принте (только если не был архивирован)
+        if has_current_print and not current_print_archived:
+            current_print = {
+                "pos": print_pos[side],
+                "size": size[side],
+                "angle": angle[side],
+                "bg_deleted": bg_deleted[side],
+                "customization": customization,
+                "photo_path": data.get("current_zone_photo"),
+                "selected_design_id": data.get("selected_design_id"),
+                "selected_design_title": data.get("selected_design_title"),
+            }
+            combined_prints = existing_prints + [current_print]
+        else:
+            combined_prints = existing_prints
+        
+        # Собираем все типы кастомизации
+        customization_types = set()
+        design_titles = []
+        for p in combined_prints:
+            if p.get("customization"):
+                customization_types.add(p["customization"])
+            title = p.get("selected_design_title")
+            if title and title not in design_titles:
+                design_titles.append(title)
+        
         zone_prints[current_zone] = {
             "side": side,
-            "pos": print_pos[side] if has_current_print else [-1, -1],
-            "size": size[side],
-            "angle": angle[side],
-            "bg_deleted": bg_deleted[side],
-            "sticker_items": [item for item in sticker_items if item.get("side", 0) == side],
-            "stickers": data.get("stickers") or [],
-            "customization": customization,
-            "selected_design_id": data.get("selected_design_id"),
-            "selected_design_title": data.get("selected_design_title"),
+            "prints": combined_prints,
+            "sticker_items": combined_sticker_items,
+            "customization_types": list(customization_types),
+            "design_titles": design_titles,
+            "has_photo": any(p.get("customization") in ("photo", "stickers") for p in combined_prints),
+            "has_design": any(p.get("customization") == "ready" for p in combined_prints),
         }
     
     # Если нет ни одной зоны — показываем пустой макет текущей зоны
     if not zone_prints:
         zone_prints[current_zone] = {
             "side": side,
-            "pos": [-1, -1],
-            "size": size[side] if size[side][0] > 0 else [400, 400],
-            "angle": 0,
-            "bg_deleted": False,
+            "prints": [],
             "sticker_items": [],
-            "stickers": [],
-            "customization": customization,
-            "selected_design_id": data.get("selected_design_id"),
-            "selected_design_title": data.get("selected_design_title"),
+            "customization_types": [],
+            "design_titles": [],
+            "has_photo": False,
+            "has_design": False,
         }
     
     # Сохраняем все зоны
@@ -2038,6 +2488,10 @@ async def confirm_print(callback: CallbackQuery, state: FSMContext):
             "zone_file_ids": zone_file_ids,
             "zone_paths": zone_paths,
         })
+    
+    # Очищаем текущие стикеры после сохранения в zone_prints
+    await state.update_data({"sticker_items": [], "stickers": []})
+    
     # После нажатия «Продолжить» спрашиваем имя питомца (если ещё не задано)
     # Для варианта "ready" (готовый дизайн) спрашиваем имя здесь
     if not data.get("pet_name") and data.get("customization") == "ready":
@@ -2143,13 +2597,29 @@ async def preview_ok(callback: CallbackQuery, state: FSMContext):
     )
     await state.update_data({"price": price_info, "discount_reward_id": reward.id if reward else None})
     text = build_price_message(price_info)
-    # Явно показываем выбранный готовый дизайн в итоговом сообщении перед оплатой
-    design_title = data.get("selected_design_title")
-    if design_title:
-        text = f"Выбранный дизайн: {design_title}\n\n" + text
+    # Собираем все названия дизайнов из всех зон
+    zone_prints = data.get("zone_prints") or {}
+    all_design_titles = []
+    for zp in zone_prints.values():
+        zone_titles = zp.get("design_titles", [])
+        for title in zone_titles:
+            if title and title not in all_design_titles:
+                all_design_titles.append(title)
+    # Также добавляем текущий дизайн если он есть
+    current_design = data.get("selected_design_title")
+    if current_design and current_design not in all_design_titles:
+        all_design_titles.append(current_design)
+    
+    if all_design_titles:
+        text = f"Выбранный дизайн: {', '.join(all_design_titles)}\n\n" + text
     if reward:
         text += "\n\nСкидка по твоей ссылке уже применена 💛"
-    await callback.message.answer(text, reply_markup=checkout_or_edit_keyboard().as_markup())
+    # Редактируем текущее сообщение вместо отправки нового
+    try:
+        await callback.message.edit_text(text, reply_markup=checkout_or_edit_keyboard().as_markup())
+    except TelegramBadRequest:
+        # Если не удалось отредактировать — отправляем новое
+        await callback.message.answer(text, reply_markup=checkout_or_edit_keyboard().as_markup())
     await state.set_state(Order.price)
 
 
@@ -2171,19 +2641,28 @@ async def preview_designer(callback: CallbackQuery, state: FSMContext):
         f"Имя питомца: {data.get('pet_name', '—')}"
     )
     
-    # Получаем file_id для всех зон
+    # Получаем file_id для всех зон (макеты)
     zone_file_ids = data.get("zone_file_ids") or {}
     user_id = callback.from_user.id
-    user_photo_path = f"prints/{user_id}.png"
     
     media = []
+    # Добавляем макеты для каждой зоны
     for zone_code, file_id in zone_file_ids.items():
         if file_id:
             media.append(InputMediaPhoto(media=file_id, caption=f"Макет: {zone_label(zone_code)}"))
     
-    if os.path.exists(user_photo_path):
-        user_photo = FSInputFile(user_photo_path)
-        media.append(InputMediaPhoto(media=user_photo, caption="Фото клиента"))
+    # Собираем ВСЕ фото из нового формата prints
+    added_photos = set()  # Чтобы не добавлять одно фото дважды
+    for zone_code, zone_data in zone_prints.items():
+        prints = zone_data.get("prints", [])
+        for i, p in enumerate(prints):
+            photo_path = p.get("photo_path")
+            if photo_path and os.path.exists(photo_path) and photo_path not in added_photos:
+                user_photo = FSInputFile(photo_path)
+                cust = p.get("customization", "photo")
+                label = "Фото" if cust != "ready" else "Для дизайна"
+                media.append(InputMediaPhoto(media=user_photo, caption=f"{label}: {zone_label(zone_code)} #{i+1}"))
+                added_photos.add(photo_path)
         
     if media:
         await callback.bot.send_message(ADMIN_ID, text)
@@ -2191,6 +2670,13 @@ async def preview_designer(callback: CallbackQuery, state: FSMContext):
     else:
         await callback.bot.send_message(ADMIN_ID, text)
 
+    # Редактируем текущее сообщение, показывая что заявка отправлена
+    try:
+        current_text = callback.message.text or ""
+        new_text = current_text + "\n\n✅ Заявка дизайнеру отправлена!"
+        await callback.message.edit_text(new_text, reply_markup=final_preview_keyboard().as_markup())
+    except TelegramBadRequest:
+        pass
     await callback.answer("Сообщение дизайнеру отправлено 💬", show_alert=True)
 
 
@@ -2199,7 +2685,11 @@ async def preview_more(callback: CallbackQuery, state: FSMContext):
     await _archive_current_print(state)
     data = await state.get_data()
     zones = zone_schemes.get(get_base_item(data.get("order_type")), zone_schemes["shirt"])
-    await callback.message.answer("Выбери новую зону нанесения 👇", reply_markup=make_zone_keyboard(zones).as_markup())
+    # Редактируем текущее сообщение вместо отправки нового
+    try:
+        await callback.message.edit_text("Выбери новую зону нанесения 👇", reply_markup=make_zone_keyboard(zones).as_markup())
+    except TelegramBadRequest:
+        await callback.message.answer("Выбери новую зону нанесения 👇", reply_markup=make_zone_keyboard(zones).as_markup())
     await state.set_state(Order.zone)
 
 
@@ -2213,15 +2703,33 @@ async def preview_share(callback: CallbackQuery, state: FSMContext):
     code = storage.create_referral_link(user_row["id"], data.get("order_id"), percent=3)
     link = await create_start_link(callback.bot, code)
     await state.update_data({"referral_code": code})
-    await callback.message.answer(
-        "Поделись ссылкой и получи −3% за каждого друга, который начнёт заказ:\n"
-        f"{link}\n\nСкидка активна 48 часов после первого перехода."
-    )
+    # Редактируем текущее сообщение с информацией о реферальной ссылке
+    try:
+        current_text = callback.message.text or ""
+        new_text = (
+            current_text + "\n\n"
+            "🔗 Поделись ссылкой и получи −3% за каждого друга:\n"
+            f"{link}\n\nСкидка активна 48 часов после первого перехода."
+        )
+        await callback.message.edit_text(new_text, reply_markup=final_preview_keyboard().as_markup())
+    except TelegramBadRequest:
+        await callback.message.answer(
+            "Поделись ссылкой и получи −3% за каждого друга, который начнёт заказ:\n"
+            f"{link}\n\nСкидка активна 48 часов после первого перехода."
+        )
+    await callback.answer()
 
 
 @router.callback_query(F.data == "edit")
 async def edit_order(callback: CallbackQuery):
     await callback.message.edit_reply_markup(reply_markup=edit_keyboard().as_markup())
+
+
+@router.callback_query(F.data == "back_to_preview")
+async def back_to_preview(callback: CallbackQuery, state: FSMContext):
+    """Возврат к финальному превью с кнопками (Хочу ещё выбрать принт и т.д.)"""
+    await _show_order_summary(callback.message, state, edit=True)
+    await callback.answer()
 
 
 @router.callback_query(F.data == "ask_item")
@@ -2268,20 +2776,13 @@ async def edit_settings(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     user_id = callback.from_user.id
     bg_deleted = data["bg_deleted"]
-    customization = data.get("customization", "photo")
-    if customization == "ready" and data.get("selected_design_id"):
-        design = find_design(data["selected_design_id"])
-        from services.designs import _build_preview
-        design_path = _build_preview(design) if design else None
-        if design_path:
-            image = Image.open(design_path)
-        else:
-            image = Image.open(f"prints/{user_id}.png")
-    else:
-        if bg_deleted[0]:
-            image = Image.open(f"prints/{user_id}_bg_deleted.png")
-        else:
-            image = Image.open(f"prints/{user_id}.png")
+    
+    try:
+        image = _load_user_photo(user_id, data, 0, for_bg_deleted=bg_deleted[0])
+    except FileNotFoundError:
+        await callback.answer("Фото не найдено", show_alert=True)
+        return
+    
     item = data["order_type"]
     color = data.get("color")
     print_pos = data["pos"]
@@ -2290,7 +2791,11 @@ async def edit_settings(callback: CallbackQuery, state: FSMContext):
     zone = data.get("order_zone", "chest")
     image1 = image.resize(tuple(size[0]), Image.Resampling.BICUBIC)
     template_override = _get_template_override_path(data, 0)
-    base_front = paste(image1, color, print_pos[0], item, 0, angle[0], bg_deleted[0], zone, template_override=template_override)
+    
+    # Сначала архивные, потом текущее фото
+    base_front = paste(None, color, "deleted", item, 0, 0, False, zone, template_override=template_override)
+    base_front = _apply_archived_prints_overlay(base_front, data, item, zone, 0, color)
+    base_front = _overlay_current_print(base_front, image1, print_pos[0], angle[0], item, 0, zone)
     base_front = _apply_stickers_overlay(base_front, data, 0)
     file = image_to_bytes(base_front)
     await callback.message.delete()

@@ -144,6 +144,10 @@ def make_side_keyboard(side):
 def make_stickers_manage_keyboard(active_index, total):
     builder = InlineKeyboardBuilder()
     builder.add(InlineKeyboardButton(
+        text="Добавить стикер",
+        callback_data="st_add_new"
+    ))
+    builder.add(InlineKeyboardButton(
         text="Выбрать стикер",
         callback_data="st_select"
     ))
@@ -167,7 +171,7 @@ def make_stickers_manage_keyboard(active_index, total):
         text="Назад",
         callback_data="settings"
     ))
-    builder.adjust(2, 2, 1, 1)
+    builder.adjust(1, 2, 2, 1, 1)
     return builder
 
 

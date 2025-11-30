@@ -18,44 +18,37 @@ def calculate_order_price(state_data: Dict, discount_percent: int = 0, pricing: 
     # Собираем данные из zone_prints (архивированные зоны)
     zone_prints = state_data.get("zone_prints") or {}
     
-    # Подсчитываем количество фото и готовых дизайнов по всем зонам
+    # Подсчитываем количество фото и дизайнов из списка prints
     photo_count = 0
     ready_design_count = 0
-    all_stickers = []
+    sticker_count = 0
     
     for zone_code, zone_data in zone_prints.items():
-        cust = zone_data.get("customization", "photo")
-        pos = zone_data.get("pos", [-1, -1])
-        has_print = isinstance(pos, list) and pos[0] != -1
+        # Новый формат: список принтов
+        prints = zone_data.get("prints", [])
         
-        if has_print or zone_data.get("sticker_items"):
-            if cust == "ready":
-                ready_design_count += 1
-            else:
-                photo_count += 1
-        
-        # Собираем стикеры из зоны
-        all_stickers.extend(zone_data.get("stickers", []))
-    
-    # Добавляем текущую зону (если есть активный принт)
-    current_customization = state_data.get("customization", "photo")
-    positions = state_data.get("pos")
-    has_current_print = False
-    if isinstance(positions, list):
-        for pos in positions:
-            if isinstance(pos, list) and pos and pos[0] != -1:
-                has_current_print = True
-                break
-    
-    current_sticker_items = state_data.get("sticker_items") or []
-    if has_current_print or current_sticker_items:
-        if current_customization == "ready":
-            ready_design_count += 1
+        # Если нет prints, проверяем старый формат
+        if not prints:
+            cust = zone_data.get("customization", "photo")
+            pos = zone_data.get("pos", [-1, -1])
+            has_print = isinstance(pos, list) and pos[0] != -1
+            if has_print:
+                if cust == "ready":
+                    ready_design_count += 1
+                else:
+                    photo_count += 1
         else:
-            photo_count += 1
-    
-    # Добавляем текущие стикеры
-    all_stickers.extend(state_data.get("stickers", []))
+            # Считаем по списку принтов
+            for p in prints:
+                cust = p.get("customization", "photo")
+                if cust == "ready":
+                    ready_design_count += 1
+                else:
+                    photo_count += 1
+        
+        # Считаем стикеры по sticker_items (точное количество)
+        zone_sticker_items = zone_data.get("sticker_items", [])
+        sticker_count += len(zone_sticker_items)
     
     # Добавляем доплату за фото питомца
     if photo_count:
@@ -68,15 +61,14 @@ def calculate_order_price(state_data: Dict, discount_percent: int = 0, pricing: 
     
     # Добавляем доплату за готовые дизайны
     if ready_design_count:
-        title = "Готовый дизайн AIVADOG"
+        title = "Готовый дизайн AIVADOG (с фото питомца)"
         if ready_design_count > 1:
-            title = f"{title} ×{ready_design_count}"
+            title = f"Готовый дизайн AIVADOG ×{ready_design_count}"
         addon_cost = cfg.get("ready_design", cfg["photo"]) * ready_design_count
         addons.append((title, addon_cost))
         total += addon_cost
 
     # Подсчитываем стикеры
-    sticker_count = len(all_stickers)
     if sticker_count:
         addon_cost = sticker_count * cfg["sticker"]
         addons.append((f"Стикеры ×{sticker_count}", addon_cost))

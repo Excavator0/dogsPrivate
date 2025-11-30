@@ -7,6 +7,7 @@ from aiogram.utils.deep_linking import create_start_link
 
 from handlers import order_handlers, shipping_handlers, admin_handlers
 from config import token
+from services.cleanup import start_cleanup_task, cleanup_old_prints
 # from aiogram.fsm.storage.redis import RedisStorage, Redis
 
 # Инициализируем логгер
@@ -48,6 +49,12 @@ async def main():
     # await create_start_link(bot, "bag")
 
 
+
+    # Запускаем очистку старых файлов при старте и фоновую задачу
+    deleted = cleanup_old_prints()
+    if deleted > 0:
+        logger.info(f"При старте удалено {deleted} старых файлов из prints/")
+    start_cleanup_task()
 
     # Пропускаем накопившиеся апдейты и запускаем polling
     await bot.delete_webhook(drop_pending_updates=True)
