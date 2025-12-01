@@ -94,9 +94,15 @@ def get_design_preview(design: ReadyDesign) -> BufferedInputFile:
         scale = max_side / float(max(w, h))
         new_size = (max(1, int(w * scale)), max(1, int(h * scale)))
         img = img.resize(new_size, Image.Resampling.LANCZOS)
-    if img.mode in ("RGBA", "LA"):
-        # Для Telegram‑превью заливаем прозрачный фон чёрным,
-        # чтобы избежать артефактов на белом/сером фоне клиента
+
+    # Если есть прозрачность (RGBA/LA или палитра с transparency),
+    # сначала приводим к RGBA и заливаем фон чёрным, чтобы Telegram
+    # не давал артефактов на прозрачных участках.
+    has_alpha = img.mode in ("RGBA", "LA") or (
+        img.mode == "P" and "transparency" in img.info
+    )
+    if has_alpha:
+        img = img.convert("RGBA")
         bg = Image.new("RGB", img.size, (0, 0, 0))
         bg.paste(img, mask=img.split()[-1])
         img = bg
