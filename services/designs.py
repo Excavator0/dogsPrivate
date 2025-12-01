@@ -14,7 +14,6 @@ DESIGNS_DIR = Path("templates") / "макеты"
 PREVIEWS_DIR = Path("templates") / "design_previews"
 PREVIEWS_DIR.mkdir(parents=True, exist_ok=True)
 POPPLER_PATH = os.getenv("POPPLER_PATH")
-MAX_DESIGNS = 12
 
 
 @dataclass(frozen=True)
@@ -39,8 +38,14 @@ def _load_designs() -> List[ReadyDesign]:
     pdf_files = sorted(DESIGNS_DIR.glob("*.pdf")) if not png_files else []
     files = png_files or pdf_files
     designs: List[ReadyDesign] = []
-    for file in files[:MAX_DESIGNS]:
-        designs.append(ReadyDesign(id=file.stem.lower(), title=_normalize_title(file.stem), path=file))
+    for file in files:
+        designs.append(
+            ReadyDesign(
+                id=file.stem.lower(),
+                title=_normalize_title(file.stem),
+                path=file,
+            )
+        )
     return designs
 
 
@@ -90,7 +95,9 @@ def get_design_preview(design: ReadyDesign) -> BufferedInputFile:
         new_size = (max(1, int(w * scale)), max(1, int(h * scale)))
         img = img.resize(new_size, Image.Resampling.LANCZOS)
     if img.mode in ("RGBA", "LA"):
-        bg = Image.new("RGB", img.size, (255, 255, 255))
+        # Для Telegram‑превью заливаем прозрачный фон чёрным,
+        # чтобы избежать артефактов на белом/сером фоне клиента
+        bg = Image.new("RGB", img.size, (0, 0, 0))
         bg.paste(img, mask=img.split()[-1])
         img = bg
     else:
