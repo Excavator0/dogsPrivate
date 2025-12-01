@@ -8,6 +8,8 @@ from io import BytesIO
 from aiogram.types import BufferedInputFile
 import rembg
 import numpy
+from aiogram.utils.mypy_hacks import lru_cache
+
 # import calculate_shades
 
 shade_factor = 0.875
@@ -45,7 +47,6 @@ lighter_shade_factor = 0.92
 TEMPLATES_DIR = Path("templates")
 CLOTHES_DIR = TEMPLATES_DIR / "одежда_png"
 MASKS_DIR = TEMPLATES_DIR / "masks"
-ZONE_MASKS_DIR = TEMPLATES_DIR / "zone_masks"
 
 
 def _iter_clothes_assets():
@@ -129,87 +130,6 @@ def generate_masks_for_clothes() -> dict:
     return {"removed": removed, "created": created, "skipped": skipped, "total_pairs": len(mapping), "outputs": results}
 
 
-def _resolve_zone_template_path(zone_key: str) -> Optional[Path]:
-    """
-    Подбирает шаблонную картинку для зоны по её ключу из PRINT_BOUNDS.
-    Нужен только для генерации масок зон (debug / отладка).
-    """
-    base, suffix = zone_key.split("_", 1)
-
-    # Зоны, совпадающие с видами (front/back)
-    if suffix in ("front", "back"):
-        for path in CLOTHES_DIR.glob(f"{base}_{suffix}*.png"):
-            if path.exists():
-                return path
-        fallback = TEMPLATES_DIR / f"{base}_{suffix}.png"
-        return fallback if fallback.exists() else None
-
-    # Рукава
-    if suffix == "sleeve_left":
-        cand = CLOTHES_DIR / f"{base}_left_sleeve.png"
-        return cand if cand.exists() else None
-    if suffix == "sleeve_right":
-        cand = CLOTHES_DIR / f"{base}_right_sleeve.png"
-        return cand if cand.exists() else None
-
-    # Капюшон
-    if suffix in ("hood", "hood_left", "hood_right"):
-        for cand in (
-            CLOTHES_DIR / f"{base}_left_hood.png",
-            CLOTHES_DIR / f"{base}_hood.png",
-        ):
-            if cand.exists():
-                return cand
-
-    # Штаны (если добавите зоны для них)
-    if suffix in ("pant_left", "pant_right"):
-        fallback = CLOTHES_DIR / f"{base}_{suffix}.png"
-        return fallback if fallback.exists() else None
-
-    return None
-
-
-def generate_zone_masks() -> dict:
-    """
-    Генерирует отдельные маски для зон из PRINT_BOUNDS.
-    Каждая маска — это белый четырехугольник зоны на чёрном фоне,
-    размер совпадает с соответствующим шаблоном одежды.
-    """
-    from print_bounds import PRINT_BOUNDS, create_quad_mask
-
-    ZONE_MASKS_DIR.mkdir(parents=True, exist_ok=True)
-
-    removed = 0
-    for old in ZONE_MASKS_DIR.glob("*.png"):
-        old.unlink(missing_ok=True)
-        removed += 1
-
-    created = 0
-    skipped = 0
-    outputs: dict[str, str] = {}
-
-    for zone_key, quad in PRINT_BOUNDS.items():
-        template_path = _resolve_zone_template_path(zone_key)
-        if not template_path or not template_path.exists():
-            skipped += 1
-            continue
-        with Image.open(template_path) as tmpl:
-            size = tmpl.size
-        mask = create_quad_mask(size, quad)
-        out_path = ZONE_MASKS_DIR / f"zone_{zone_key}.png"
-        mask.save(out_path, "PNG")
-        created += 1
-        outputs[zone_key] = str(out_path)
-
-    return {
-        "removed": removed,
-        "created": created,
-        "skipped": skipped,
-        "total": len(PRINT_BOUNDS),
-        "outputs": outputs,
-    }
-
-
 # def change_print_shade(image, item):
 #     """
 #     Быстрая векторизованная версия применения оттенков по предрасчитанной карте.
@@ -287,6 +207,16 @@ def _resolve_template_path(item_code: str, side: int) -> Path:
     raise FileNotFoundError(f"Не найден макет {item_code} ({side_name})")
 
 
+def get_template_bounds(item_code: str) -> tuple[int, int]:
+    """
+    Возвращает размер базового шаблона (front) для изделия.
+    Используется как запасной вариант, если маска зоны не найдена.
+    """
+    template_path = _resolve_template_path(item_code, 0)
+    with Image.open(template_path) as template:
+        return template.size
+
+
 def _resolve_template_for_paste(item_code: str, side: int, zone: str | None) -> Path:
     """
     Возвращает путь к нужному макету с учётом зоны (рукав, капюшон и т.п.).
@@ -347,8 +277,132 @@ def _is_special_zone(zone: str | None) -> bool:
     return zone in special_zones
 
 
+_ZONE_SUFFIX_MAP = {
+    "sleeve_left": "left_sleeve",
+    "sleeve_right": "right_sleeve",
+    "hood_left": "left_hood",
+    "hood_right": "right_hood",
+    "hood": "hood",
+}
+
+
+def _resolve_zone_mask_name(item_code: str, side: int, zone: str | None) -> Optional[str]:
+    """
+    Подбирает имя маски зоны на основе кода изделия и зоны.
+    Маски лежат в templates/masks и имеют вид:
+      - mask_shirt_front.png
+      - mask_shirt_back.png
+      - mask_hoodie_left_sleeve.png и т.п.
+    """
+    base_item, _ = _split_item_code(item_code)
+    if not base_item:
+        return None
+    suffix: Optional[str] = None
+    if zone in ("chest", None):
+        suffix = "front" if side == 0 else "back"
+    elif zone == "back":
+        suffix = "back"
+    elif zone in _ZONE_SUFFIX_MAP:
+        suffix = _ZONE_SUFFIX_MAP[zone]
+    elif zone and zone.startswith("pant_"):
+        suffix = zone.replace("pant_", "")
+    elif zone in ("pant_left", "pant_right"):
+        suffix = "front_left" if zone == "pant_left" else "front_right"
+    else:
+        suffix = "front" if side == 0 else "back"
+    return f"{base_item}_{suffix}" if suffix else None
+
+
+@lru_cache(maxsize=128)
+def _load_zone_mask_image(item_code: str, side: int, zone: str | None) -> Optional[Image.Image]:
+    """
+    Загружает маску зоны как изображение в режиме "L".
+    В маске нужная зона чёрная, фон — прозрачный.
+    Мы используем альфа-канал как зону (alpha > 0 -> 255, иначе 0).
+    """
+    mask_name = _resolve_zone_mask_name(item_code, side, zone)
+    if not mask_name:
+        return None
+    mask_path = MASKS_DIR / f"mask_{mask_name}.png"
+    if not mask_path.exists():
+        return None
+    with Image.open(mask_path).convert("RGBA") as img:
+        alpha = img.split()[-1]
+        binary = alpha.point(lambda a: 255 if a > 0 else 0, mode="L")
+        return binary
+
+
+@lru_cache(maxsize=128)
+def _get_zone_mask_bbox(item_code: str, side: int, zone: str | None) -> tuple[int, int, int, int]:
+    """
+    Возвращает bounding box зоны по маске.
+    Если маска не найдена, используется весь шаблон.
+    """
+    mask = _load_zone_mask_image(item_code, side, zone)
+    if mask:
+        bbox = mask.getbbox()
+        if bbox:
+            return bbox
+    width, height = get_template_bounds(item_code)
+    return (0, 0, width, height)
+
+
+def _clamp_position_with_mask(
+    print_x: int,
+    print_y: int,
+    print_width: int,
+    print_height: int,
+    item_code: str,
+    side: int,
+    zone: Optional[str],
+) -> list[int]:
+    """
+    Ограничивает позицию принта так, чтобы он оставался внутри зоны маски.
+    """
+    x_min, y_min, x_max, y_max = _get_zone_mask_bbox(item_code, side, zone)
+    max_x = x_max - print_width
+    max_y = y_max - print_height
+    clamped_x = max(x_min, min(print_x, max_x))
+    clamped_y = max(y_min, min(print_y, max_y))
+    return [int(clamped_x), int(clamped_y)]
+
+
+def _get_centered_position_in_zone(
+    item_code: str,
+    side: int,
+    zone: Optional[str],
+    print_width: int,
+    print_height: int,
+) -> list[int]:
+    """
+    Центрирует принт внутри маски зоны.
+    """
+    x_min, y_min, x_max, y_max = _get_zone_mask_bbox(item_code, side, zone)
+    area_width = max(1, x_max - x_min)
+    area_height = max(1, y_max - y_min)
+    center_x = x_min + area_width // 2
+    center_y = y_min + area_height // 2
+    pos_x = center_x - print_width // 2
+    pos_y = center_y - print_height // 2
+    return _clamp_position_with_mask(pos_x, pos_y, print_width, print_height, item_code, side, zone)
+
+
+def _get_zone_mask_for_overlay(
+    item_code: str,
+    side: int,
+    zone: Optional[str],
+    target_size: tuple[int, int],
+) -> Optional[Image.Image]:
+    """
+    Возвращает маску зоны, подогнанную под нужный размер (для наложения принта).
+    """
+    mask = _load_zone_mask_image(item_code, side, zone)
+    if mask and mask.size != target_size:
+        mask = mask.resize(target_size, Image.Resampling.NEAREST)
+    return mask
+
+
 def paste(image, color, pos, item, side, angle, bg_deleted=False, zone=None, template_override=None):
-    base_item, _ = _split_item_code(item)
     # Для специальных зон (рукав, капюшон) игнорируем template_override,
     # так как он содержит front/back макет, а не шаблон этой зоны
     use_override = template_override and Path(template_override).exists() and not _is_special_zone(zone)
@@ -358,24 +412,8 @@ def paste(image, color, pos, item, side, angle, bg_deleted=False, zone=None, tem
         template_path = _resolve_template_for_paste(item, side, zone)
         template = Image.open(template_path).convert("RGBA")
 
-    # Для специальных зон (рукав, капюшон) маска front/back не применима
-    if _is_special_zone(zone):
-        mask = None
-    else:
-        mask_path = MASKS_DIR / f"mask_{base_item}_{'front' if side == 0 else 'back'}.png"
-        mask = Image.open(mask_path).convert("L") if mask_path.exists() else None
-    
-    # Создаем дополнительную маску для ограничения области принта
-    from print_bounds import get_print_bounds, create_quad_mask
-    bounds_quad = get_print_bounds(item, side, zone)
-    if bounds_quad:
-        bounds_mask = create_quad_mask(template.size, bounds_quad)
-        # Если есть основная маска одежды, объединяем её с маской области
-        if mask is not None:
-            from PIL import ImageChops
-            mask = ImageChops.darker(mask, bounds_mask)
-        else:
-            mask = bounds_mask
+    # Маска зоны для ограничения области принта и перекраски
+    mask = _get_zone_mask_for_overlay(item, side, zone, template.size)
 
     color_layer = None
     if color is not None and mask is not None:

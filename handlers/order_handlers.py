@@ -5,6 +5,8 @@ from datetime import datetime, timedelta
 from functools import lru_cache
 from typing import Union
 
+from PIL import Image
+
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart
@@ -18,11 +20,11 @@ import keyboards.order_keyboards
 from config import ADMIN_ID
 from database.db import Database
 from image_processing import *
-from image_processing import _resolve_template_path
+from image_processing import _resolve_template_path, _get_centered_position_in_zone, _get_zone_mask_for_overlay, \
+    _clamp_position_with_mask, _get_zone_mask_bbox
 from keyboards.confirmation_keyboards import *
 from keyboards.order_keyboards import *
 from keyboards.print_processing_keyboards import *
-from print_bounds import get_print_bounds, clamp_position, get_centered_position_in_bounds
 from services.designs import find_design, get_design_preview, list_ready_designs
 from services.pricing import DEFAULT_PRICING, build_price_message, calculate_order_price
 from services.stickers import list_stickers, list_sticker_categories, list_stickers_in_category, get_sticker_path
@@ -238,9 +240,11 @@ def get_base_item(item_code: str) -> str:
 
 @lru_cache(maxsize=32)
 def get_template_bounds(item_code: str) -> tuple[int, int]:
-    template_path = _resolve_template_path(item_code, 0)
-    with Image.open(template_path) as template:
-        return template.size
+    """
+    Обёртка вокруг image_processing.get_template_bounds для совместимости.
+    """
+    from image_processing import get_template_bounds as _gtb
+    return _gtb(item_code)
 
 
 def _get_template_override_path(data: dict, side: int) -> str | None:
@@ -328,6 +332,10 @@ async def _archive_current_print(state: FSMContext):
     Поддерживает несколько фото/дизайнов на одной зоне — хранит список prints.
     """
     data = await state.get_data()
+    # Если текущий принт уже был сохранён (через confirm), повторно не архивируем,
+    # чтобы не дублировать его в zone_prints
+    if data.get("current_print_archived"):
+        return
     zone = data.get("order_zone", "chest")
     side = data.get("side", 0)
     pos = data.get("pos") or [[-1, -1], [-1, -1]]
@@ -696,7 +704,7 @@ async def design_pick(callback: CallbackQuery, state: FSMContext):
     })
     await callback.message.delete()
     await callback.message.answer(
-        f"Отлично! Теперь загрузи фото своего питомца документом (PNG/JPG до 2 МБ), чтобы мы вставили его в макет «{design.title}».\n"
+        f"Отлично! Теперь загрузи фото своего питомца документом (PNG/JPG до 2 МБ), чтобы мы вставили его в макет «{design.title}».\n\n"
         f"⚠️ Важно: ракурс питомца должен быть похож на пример в выбранном дизайне.",
     )
     await state.set_state(Order.image_sent)
@@ -793,16 +801,13 @@ async def getting_image(message: Message, state: FSMContext):
                 template_width, template_height = get_template_bounds(item)
                 
                 # Получаем границы для размещения принта на нужной стороне
-                bounds = get_print_bounds(item, side, zone)
-                if bounds:
-                    # Центрируем принт в пределах допустимой области
-                    centre_pos = list(get_centered_position_in_bounds(
-                        image.size[0], image.size[1], bounds
-                    ))
-                else:
-                    # Если границы не заданы, используем стандартное центрирование
-                    centre_pos = [(template_width - image.size[0]) // 2,
-                                  (template_height - image.size[1]) // 2]
+                centre_pos = _get_centered_position_in_zone(
+                    item,
+                    side,
+                    zone,
+                    image.size[0],
+                    image.size[1],
+                )
                 
                 # Устанавливаем позицию на правильную сторону (side)
                 pos = [[-1, -1], [-1, -1]]
@@ -950,9 +955,7 @@ def _overlay_current_print(base_image: Image.Image, print_image: Image.Image, po
     if pos == "deleted" or (isinstance(pos, list) and pos[0] == -1):
         return base_image
     
-    from print_bounds import get_print_bounds, create_quad_mask
-    bounds_quad = get_print_bounds(item, side, zone)
-    zone_mask = create_quad_mask(base_image.size, bounds_quad) if bounds_quad else None
+    zone_mask = _get_zone_mask_for_overlay(item, side, zone, base_image.size)
     
     composed = base_image.copy().convert("RGBA")
     
@@ -991,9 +994,7 @@ def _apply_archived_prints_overlay(base_image: Image.Image, data: dict, item: st
         return base_image
     
     # Получаем маску для обрезки по границам зоны
-    from print_bounds import get_print_bounds, create_quad_mask
-    bounds_quad = get_print_bounds(item, side, zone)
-    zone_mask = create_quad_mask(base_image.size, bounds_quad) if bounds_quad else None
+    zone_mask = _get_zone_mask_for_overlay(item, side, zone, base_image.size)
     
     composed = base_image.copy().convert("RGBA")
     
@@ -1690,7 +1691,6 @@ async def remove_print_bg(callback: CallbackQuery, state: FSMContext):
         image = Image.open(f"prints/{user_id}.png")
     
     item = data["order_type"]
-    template_width, template_height = get_template_bounds(item)
     color = data.get("color")
     side = data["side"]
     print_pos = data["pos"]
@@ -1782,7 +1782,6 @@ async def print_size(callback: CallbackQuery, state: FSMContext):
     
     item = data["order_type"]
     zone = data.get("order_zone", "chest")
-    template_width, template_height = get_template_bounds(item)
     color = data.get("color")
     print_pos = data["pos"]
     angle = data["angle"]
@@ -1791,15 +1790,9 @@ async def print_size(callback: CallbackQuery, state: FSMContext):
     y_size = size[side][1]
     
     # Получаем границы для размещения принта
-    bounds = get_print_bounds(item, side, zone)
-    if bounds:
-        xs = [p[0] for p in bounds]
-        ys = [p[1] for p in bounds]
-        max_width = max(xs) - min(xs)
-        max_height = max(ys) - min(ys)
-    else:
-        max_width = template_width
-        max_height = template_height
+    x_min, y_min, x_max, y_max = _get_zone_mask_bbox(item, side, zone)
+    max_width = max(1, x_max - x_min)
+    max_height = max(1, y_max - y_min)
     
     new_size = 0
     size_changed = False
@@ -1818,16 +1811,20 @@ async def print_size(callback: CallbackQuery, state: FSMContext):
         if new_width < max_width and new_height < max_height:
             new_size = (new_width, new_height)
             # Корректируем позицию, если принт выходит за границы
-            if bounds:
-                print_pos[side] = list(clamp_position(
-                    print_pos[side][0], print_pos[side][1],
-                    new_width, new_height, bounds
-                ))
             size_changed = True
         else:
             await callback.answer("Достигнут максимум разрешения изображения")
     if size_changed:
         size[side] = new_size
+        print_pos[side] = _clamp_position_with_mask(
+            print_pos[side][0],
+            print_pos[side][1],
+            size[side][0],
+            size[side][1],
+            item,
+            side,
+            zone,
+        )
         image = image.resize(tuple(size[side]), Image.Resampling.BICUBIC)
         template_override = _get_template_override_path(data, side)
         
@@ -1838,7 +1835,7 @@ async def print_size(callback: CallbackQuery, state: FSMContext):
         base = _overlay_current_print(base, image, print_pos[side], angle[side], item, side, zone)
         base = _apply_stickers_overlay(base, data, side)
         file = image_to_bytes(base)
-        await state.update_data({"size": size})
+        await state.update_data({"size": size, "pos": print_pos})
         file = InputMediaPhoto(media=file)
         await callback.message.edit_media(file, reply_markup=make_print_size_keyboard().as_markup())
 
@@ -1863,124 +1860,67 @@ async def move_print(callback: CallbackQuery, state: FSMContext):
     
     item = data["order_type"]
     zone = data.get("order_zone", "chest")
-    template_width, template_height = get_template_bounds(item)
     color = data.get("color")
     print_pos = data["pos"]
     angle = data["angle"]
     size = data["size"]
     
-    # Получаем границы для размещения принта
-    bounds = get_print_bounds(item, side, zone)
+    current_pos = print_pos[side]
+    if not isinstance(current_pos, list) or current_pos[0] == -1:
+        await callback.answer("Нет активного принта", show_alert=True)
+        return
+
+    def _apply_shift(delta_x: int, delta_y: int) -> bool:
+        current = print_pos[side]
+        target = _clamp_position_with_mask(
+            current[0] + delta_x,
+            current[1] + delta_y,
+            size[side][0],
+            size[side][1],
+            item,
+            side,
+            zone,
+        )
+        if target[0] != current[0] or target[1] != current[1]:
+            print_pos[side] = target
+            return True
+        return False
 
     pos_changed = False
     if callback.data == "move_right":
-        new_x = print_pos[side][0] + size_step
-        if bounds:
-            # Используем clamp_position, чтобы не выходить за рамки многоугольника
-            clamped_x, _ = clamp_position(
-                new_x,
-                print_pos[side][1],
-                size[side][0],
-                size[side][1],
-                bounds,
-            )
-            if clamped_x != print_pos[side][0]:
-                print_pos[side][0] = clamped_x
-                pos_changed = True
-            else:
-                await callback.answer("Достигнут максимум сдвига вправо")
-        else:
-            if new_x < template_width:
-                print_pos[side][0] = new_x
-                pos_changed = True
-            else:
-                await callback.answer("Достигнут максимум сдвига вправо")
+        pos_changed = _apply_shift(size_step, 0)
+        if not pos_changed:
+            await callback.answer("Достигнут максимум сдвига вправо")
+            return
     elif callback.data == "move_left":
-        new_x = print_pos[side][0] - size_step
-        if bounds:
-            clamped_x, _ = clamp_position(
-                new_x,
-                print_pos[side][1],
-                size[side][0],
-                size[side][1],
-                bounds,
-            )
-            if clamped_x != print_pos[side][0]:
-                print_pos[side][0] = clamped_x
-                pos_changed = True
-            else:
-                await callback.answer("Достигнут максимум сдвига влево")
-        else:
-            if new_x > 0:
-                print_pos[side][0] = new_x
-                pos_changed = True
-            else:
-                await callback.answer("Достигнут максимум сдвига влево")
+        pos_changed = _apply_shift(-size_step, 0)
+        if not pos_changed:
+            await callback.answer("Достигнут максимум сдвига влево")
+            return
     elif callback.data == "move_up":
-        new_y = print_pos[side][1] - size_step
-        if bounds:
-            _, clamped_y = clamp_position(
-                print_pos[side][0],
-                new_y,
-                size[side][0],
-                size[side][1],
-                bounds,
-            )
-            if clamped_y != print_pos[side][1]:
-                print_pos[side][1] = clamped_y
-                pos_changed = True
-            else:
-                await callback.answer("Достигнут максимум сдвига вверх")
-        else:
-            if new_y > 0:
-                print_pos[side][1] = new_y
-                pos_changed = True
-            else:
-                await callback.answer("Достигнут максимум сдвига вверх")
+        pos_changed = _apply_shift(0, -size_step)
+        if not pos_changed:
+            await callback.answer("Достигнут максимум сдвига вверх")
+            return
     elif callback.data == "move_down":
-        new_y = print_pos[side][1] + size_step
-        if bounds:
-            _, clamped_y = clamp_position(
-                print_pos[side][0],
-                new_y,
-                size[side][0],
-                size[side][1],
-                bounds,
-            )
-            if clamped_y != print_pos[side][1]:
-                print_pos[side][1] = clamped_y
-                pos_changed = True
-            else:
-                await callback.answer("Достигнут максимум сдвига вниз")
-        else:
-            if new_y < template_height:
-                print_pos[side][1] = new_y
-                pos_changed = True
-            else:
-                await callback.answer("Достигнут максимум сдвига вниз")
+        pos_changed = _apply_shift(0, size_step)
+        if not pos_changed:
+            await callback.answer("Достигнут максимум сдвига вниз")
+            return
     elif callback.data == "move_centre":
-        if bounds:
-            # Центрируем в пределах допустимой области
-            rotations = angle[side] % 180
-            if rotations == 0:
-                print_pos[side] = list(get_centered_position_in_bounds(
-                    size[side][0], size[side][1], bounds
-                ))
-            else:
-                # После поворота размеры меняются местами
-                print_pos[side] = list(get_centered_position_in_bounds(
-                    size[side][1], size[side][0], bounds
-                ))
+        rotations = angle[side] % 180
+        effective_width = size[side][0] if rotations == 0 else size[side][1]
+        effective_height = size[side][1] if rotations == 0 else size[side][0]
+        target = _get_centered_position_in_zone(item, side, zone, effective_width, effective_height)
+        if target != print_pos[side]:
+            print_pos[side] = target
+            pos_changed = True
         else:
-            # Стандартное центрирование по всему шаблону
-            rotations = angle[side] % 180
-            if rotations == 0:
-                print_pos[side] = [(template_width - size[side][0]) // 2,
-                                   (template_height - size[side][1]) // 2]
-            else:
-                print_pos[side] = [(template_width - size[side][1]) // 2,
-                                   (template_height - size[side][0]) // 2]
-        pos_changed = True
+            await callback.answer("Изображение находится в центре")
+            return
+    else:
+        await callback.answer()
+        return
     if pos_changed:
         image = image.resize(tuple(size[side]), Image.Resampling.BICUBIC)
         template_override = _get_template_override_path(data, side)
@@ -2128,22 +2068,17 @@ async def change_side_zone(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Фото не найдено", show_alert=True)
         return
 
-    template_width, template_height = get_template_bounds(item)
-
     # Если ещё нет размера для этой стороны — берём размеры исходника
     if not size[side] or size[side][0] == 0 or size[side][1] == 0:
         size[side] = list(image.size)
 
-    bounds = get_print_bounds(item, side, new_zone)
-    if bounds:
-        pos = list(
-            get_centered_position_in_bounds(size[side][0], size[side][1], bounds)
-        )
-    else:
-        pos = [
-            (template_width - size[side][0]) // 2,
-            (template_height - size[side][1]) // 2,
-        ]
+    pos = _get_centered_position_in_zone(
+        item,
+        side,
+        new_zone,
+        size[side][0],
+        size[side][1],
+    )
     print_pos[side] = pos
     angle[side] = 0
 
@@ -2233,9 +2168,7 @@ def _generate_zone_mockup(user_id: int, item: str, zone: str, zone_data: dict, c
     mockup = paste(None, color, "deleted", item, side, 0, False, zone, template_override=None)
     
     # Получаем маску для обрезки по границам зоны
-    from print_bounds import get_print_bounds, create_quad_mask
-    bounds_quad = get_print_bounds(item, side, zone)
-    zone_mask = create_quad_mask(mockup.size, bounds_quad) if bounds_quad else None
+    zone_mask = _get_zone_mask_for_overlay(item, side, zone, mockup.size)
     
     # Накладываем каждый принт
     for print_data in prints:
@@ -2434,8 +2367,9 @@ async def confirm_print(callback: CallbackQuery, state: FSMContext):
             "has_design": False,
         }
     
-    # Сохраняем все зоны
-    await state.update_data({"zone_prints": zone_prints})
+    # Сохраняем все зоны и помечаем текущий принт как архивированный,
+    # чтобы _archive_current_print не добавлял его повторно при preview_more
+    await state.update_data({"zone_prints": zone_prints, "current_print_archived": True})
     
     # Генерируем макеты для каждой зоны
     media_files = []
