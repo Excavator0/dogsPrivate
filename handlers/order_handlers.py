@@ -94,7 +94,7 @@ def designs_available() -> bool:
 
 
 def _design_caption(design) -> str:
-    return f"«{design.title}» — фирменный макет AIVADOG. Добавим твоего питомца, дизайнер адаптирует его под стиль макета и покажем предпросмотр."
+    return f"{design.title} — фирменный макет AIVADOG. Добавим твоего питомца, дизайнер адаптирует его под стиль макета и покажем предпросмотр"
 
 
 def _design_keyboard(mode: str, index: int, design_id: str) -> InlineKeyboardBuilder:
@@ -159,7 +159,7 @@ async def _handle_preselected_ready(target: Union[Message, CallbackQuery], state
     builder.add(InlineKeyboardButton(text="Сменить макет", callback_data="design_change"))
     await _reply(
         target,
-        f"Ты выбрал макет «{design_title}». Теперь загрузи фото питомца документом (PNG/JPG до 2 МБ). "
+        f"Ты выбрал макет {design_title}. Теперь загрузи фото питомца документом (PNG/JPG до 2 МБ) "
         "Ракурс должен быть похож на пример.",
         reply_markup=builder.as_markup(),
     )
@@ -178,7 +178,7 @@ async def choose_customization(callback: CallbackQuery, state: FSMContext):
         return
     zone_title = zone_label(zone)
     await callback.message.edit_text(
-        text=f"Выбери вариант кастомизации для зоны «{zone_title}»:"
+        text=f"Выбери вариант кастомизации для зоны {zone_title}:"
     )
     await callback.message.edit_reply_markup(
         reply_markup=make_customization_keyboard(show_ready_design=designs_available()).as_markup()
@@ -644,7 +644,7 @@ async def example_pick(callback: CallbackQuery, state: FSMContext):
     })
     await callback.message.delete()
     await callback.message.answer(
-        f"Дизайн «{design.title}» сохранён! Теперь выбери изделие 👇",
+        f"Дизайн {design.title} сохранён! Теперь выбери изделие 👇",
         reply_markup=make_type_keyboard(order_types).as_markup()
     )
     await state.set_state(Order.order_type)
@@ -704,8 +704,8 @@ async def design_pick(callback: CallbackQuery, state: FSMContext):
     })
     await callback.message.delete()
     await callback.message.answer(
-        f"Отлично! Теперь загрузи фото своего питомца документом (PNG/JPG до 2 МБ), чтобы мы вставили его в макет «{design.title}».\n\n"
-        f"⚠️ Важно: ракурс питомца должен быть похож на пример в выбранном дизайне.",
+        f"Отлично! Теперь загрузи фото своего питомца документом (PNG/JPG до 2 МБ), чтобы мы вставили его в макет {design.title}.\n\n"
+        f"⚠️ Важно: ракурс питомца должен быть похож на пример в выбранном дизайне",
     )
     await state.set_state(Order.image_sent)
 
