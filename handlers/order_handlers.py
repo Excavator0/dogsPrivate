@@ -1,6 +1,7 @@
 import json
 import os
 import time
+from copy import deepcopy
 from datetime import datetime, timedelta
 from functools import lru_cache
 from typing import Union
@@ -188,6 +189,7 @@ async def choose_customization(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "back_to_items")
 async def back_to_items(callback: CallbackQuery, state: FSMContext):
+    await state.update_data({"zone_return": None})
     await callback.message.edit_text('Выбери изделие, на которое хочешь нанести принт')
     await callback.message.edit_reply_markup(reply_markup=make_type_keyboard(order_types).as_markup())
     await state.set_state(Order.order_type)
@@ -226,6 +228,23 @@ async def customization_selected(callback: CallbackQuery, state: FSMContext):
     await state.set_state(Order.image_sent)
 
 
+@router.callback_query(F.data == "back_to_customization")
+async def back_to_customization(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    zone = data.get("order_zone", "chest")
+    zone_title = zone_label(zone)
+    text = f"Выбери вариант кастомизации для зоны «{zone_title}»:"
+    keyboard = make_customization_keyboard(show_ready_design=designs_available()).as_markup()
+    try:
+        await callback.message.delete()
+    except TelegramBadRequest:
+        pass
+    await callback.message.answer(text, reply_markup=keyboard)
+    await state.update_data({"edit_history": None})
+    await state.set_state(Order.customization)
+    await callback.answer()
+
+
 @router.callback_query(F.data == "back_to_zones")
 async def back_to_zones(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
@@ -233,6 +252,29 @@ async def back_to_zones(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text("Выбери зону нанесения принта 👇")
     await callback.message.edit_reply_markup(reply_markup=make_zone_keyboard(zones).as_markup())
     await state.set_state(Order.zone)
+
+@router.callback_query(F.data == "back_zone")
+async def back_zone(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    return_mode = data.get("zone_return")
+    if return_mode == "sizes":
+        await state.update_data({"zone_return": None})
+        await callback.message.edit_text("Выбери размер изделия")
+        await callback.message.edit_reply_markup(
+            reply_markup=make_sizes_keyboard(sizes[:-1]).as_markup()
+        )
+        await state.set_state(Order.order_size)
+    elif return_mode == "preview":
+        await state.update_data({"zone_return": None})
+        await _show_order_summary(callback.message, state, edit=True)
+        await state.set_state(Order.customization)
+    else:
+        await state.update_data({"zone_return": None})
+        await callback.message.edit_text('Выбери изделие, на которое хочешь нанести принт')
+        await callback.message.edit_reply_markup(make_type_keyboard(order_types).as_markup())
+        await state.set_state(Order.order_type)
+    await callback.answer()
+
 
 def get_base_item(item_code: str) -> str:
     return item_code.split("_", 1)[0]
@@ -245,6 +287,86 @@ def get_template_bounds(item_code: str) -> tuple[int, int]:
     """
     from image_processing import get_template_bounds as _gtb
     return _gtb(item_code)
+
+
+def _make_edit_snapshot(data: dict) -> dict:
+    """
+    Сохраняет ключевые параметры текущего макета для отката изменений
+    в режиме редактирования.
+    """
+    keys = [
+        "pos",
+        "size",
+        "angle",
+        "bg_deleted",
+        "side",
+        "order_zone",
+        "current_zone_photo",
+        "stickers",
+        "sticker_items",
+    ]
+    snapshot = {}
+    for key in keys:
+        if key in data:
+            snapshot[key] = deepcopy(data.get(key))
+    return snapshot
+
+
+async def _ensure_edit_snapshot(state: FSMContext) -> None:
+    """
+    Гарантирует, что в состоянии есть история изменений для отката.
+    """
+    data = await state.get_data()
+    history = data.get("edit_history")
+    if not isinstance(history, list) or not history:
+        snapshot = _make_edit_snapshot(data)
+        await state.update_data({"edit_history": [snapshot]})
+
+
+async def _push_edit_snapshot(state: FSMContext) -> None:
+    """
+    Добавляет текущий снимок макета в историю изменений.
+    """
+    data = await state.get_data()
+    history = data.get("edit_history")
+    if not isinstance(history, list):
+        history = []
+    snapshot = _make_edit_snapshot(data)
+    history.append(snapshot)
+    if len(history) > 30:
+        history = history[-30:]
+    await state.update_data({"edit_history": history})
+
+
+async def _restore_edit_snapshot(state: FSMContext) -> bool:
+    """
+    Откатывает последнее изменение. Возвращает True, если откат выполнен.
+    """
+    data = await state.get_data()
+    history = data.get("edit_history")
+    if not isinstance(history, list) or len(history) <= 1:
+        return False
+
+    history = history[:-1]
+    snapshot = deepcopy(history[-1])
+
+    updates = {}
+    for key, value in snapshot.items():
+        updates[key] = deepcopy(value)
+
+    updates.setdefault("stickers", [])
+    updates.setdefault("sticker_items", [])
+    updates.setdefault("side", data.get("side", 0))
+    updates.setdefault("order_zone", data.get("order_zone", "chest"))
+    updates.setdefault("bg_deleted", data.get("bg_deleted") or [False, False])
+    updates.setdefault("angle", data.get("angle") or [0, 0])
+    updates.setdefault("size", data.get("size") or [[0, 0], [0, 0]])
+    updates.setdefault("pos", data.get("pos") or [[-1, -1], [-1, -1]])
+
+    updates["current_print_archived"] = False
+    updates["edit_history"] = history
+    await state.update_data(updates)
+    return True
 
 
 def _get_template_override_path(data: dict, side: int) -> str | None:
@@ -428,6 +550,7 @@ async def _archive_current_print(state: FSMContext):
             "stickers_planned": False,
             "current_zone_photo": None,
             "current_print_archived": True,  # Флаг что текущий принт уже сохранён
+            "edit_history": None,
         }
     )
 
@@ -760,7 +883,7 @@ async def order_size(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data.startswith("size_"))
 async def order_zone(callback: CallbackQuery, state: FSMContext):
     size = callback.data.replace("size_", "").upper()
-    await state.update_data({"order_size": size})
+    await state.update_data({"order_size": size, "zone_return": "sizes"})
     data = await state.get_data()
     item = data["order_type"]
     template_width, template_height = get_template_bounds(item)
@@ -1346,6 +1469,7 @@ async def sticker_browse(callback: CallbackQuery, state: FSMContext):
     """
     Навигация по стикерам внутри выбранной категории и добавление текущего стикера.
     """
+    await _ensure_edit_snapshot(state)
     data = await state.get_data()
     codes = data.get("current_sticker_codes") or []
     if not codes:
@@ -1355,12 +1479,13 @@ async def sticker_browse(callback: CallbackQuery, state: FSMContext):
     index = int(data.get("current_sticker_index", 0)) % len(codes)
 
     if callback.data == "sticker_add":
-        stickers = data.get("stickers", [])
-        sticker_items = data.get("sticker_items") or []
+        stickers = list(data.get("stickers", []))
+        sticker_items = deepcopy(data.get("sticker_items") or [])
         current_code = codes[index]
         if len(sticker_items) >= 10:
             await callback.answer("Можно добавить не больше 10 стикеров", show_alert=True)
             return
+        await _push_edit_snapshot(state)
         # Добавляем код для summary
         stickers.append(current_code)
         # Создаём инстанс стикера со значениями по умолчанию
@@ -1480,6 +1605,7 @@ async def sticker_move_main(callback: CallbackQuery):
 @router.callback_query(F.data.in_({"st_move_up", "st_move_down", "st_move_left", "st_move_right", "st_move_centre"}))
 async def sticker_move(callback: CallbackQuery, state: FSMContext):
     from keyboards.print_processing_keyboards import make_sticker_move_keyboard
+    await _ensure_edit_snapshot(state)
     data = await state.get_data()
     items = data.get("sticker_items") or []
     active = data.get("active_sticker_index")
@@ -1488,9 +1614,9 @@ async def sticker_move(callback: CallbackQuery, state: FSMContext):
         return
     item_code = data.get("order_type")
     template_width, template_height = get_template_bounds(item_code)
-    sticker = items[active]
-    pos = sticker.get("pos") or [0, 0]
-    size = sticker.get("size") or [100, 100]
+    sticker = deepcopy(items[active])
+    pos = list(sticker.get("pos") or [0, 0])
+    size = list(sticker.get("size") or [100, 100])
     angle = int(sticker.get("angle", 0))
     changed = False
     if callback.data == "st_move_right":
@@ -1520,6 +1646,7 @@ async def sticker_move(callback: CallbackQuery, state: FSMContext):
             pos[1] = (template_height - size[0]) // 2
         changed = True
     if changed:
+        await _push_edit_snapshot(state)
         sticker["pos"] = pos
         items[active] = sticker
         await state.update_data({"sticker_items": items})
@@ -1538,6 +1665,7 @@ async def sticker_size_main(callback: CallbackQuery):
 @router.callback_query(F.data.in_({"st_increase_size", "st_decrease_size"}))
 async def sticker_size(callback: CallbackQuery, state: FSMContext):
     from keyboards.print_processing_keyboards import make_sticker_size_keyboard
+    await _ensure_edit_snapshot(state)
     data = await state.get_data()
     items = data.get("sticker_items") or []
     active = data.get("active_sticker_index")
@@ -1546,8 +1674,8 @@ async def sticker_size(callback: CallbackQuery, state: FSMContext):
         return
     item_code = data.get("order_type")
     template_width, template_height = get_template_bounds(item_code)
-    sticker = items[active]
-    size = sticker.get("size") or [100, 100]
+    sticker = deepcopy(items[active])
+    size = list(sticker.get("size") or [100, 100])
     x_size, y_size = size
     changed = False
     if callback.data == "st_decrease_size":
@@ -1565,6 +1693,7 @@ async def sticker_size(callback: CallbackQuery, state: FSMContext):
         else:
             await callback.answer("Достигнут максимум размера стикера")
     if changed:
+        await _push_edit_snapshot(state)
         sticker["size"] = size
         items[active] = sticker
         await state.update_data({"sticker_items": items})
@@ -1583,18 +1712,20 @@ async def sticker_rotate_main(callback: CallbackQuery):
 @router.callback_query(F.data.in_({"st_rotate_left", "st_rotate_right"}))
 async def sticker_rotate(callback: CallbackQuery, state: FSMContext):
     from keyboards.print_processing_keyboards import make_sticker_rotate_keyboard
+    await _ensure_edit_snapshot(state)
     data = await state.get_data()
     items = data.get("sticker_items") or []
     active = data.get("active_sticker_index")
     if active is None or not (0 <= active < len(items)):
         await callback.answer("Сначала выбери стикер", show_alert=True)
         return
-    sticker = items[active]
+    sticker = deepcopy(items[active])
     angle = int(sticker.get("angle", 0))
     if callback.data == "st_rotate_right":
         angle += 270
     else:
         angle += 90
+    await _push_edit_snapshot(state)
     sticker["angle"] = angle
     items[active] = sticker
     await state.update_data({"sticker_items": items})
@@ -1605,16 +1736,18 @@ async def sticker_rotate(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "st_delete")
 async def sticker_delete(callback: CallbackQuery, state: FSMContext):
     from keyboards.print_processing_keyboards import make_stickers_manage_keyboard
+    await _ensure_edit_snapshot(state)
     data = await state.get_data()
-    items = data.get("sticker_items") or []
+    items = deepcopy(data.get("sticker_items") or [])
     active = data.get("active_sticker_index")
     if active is None or not (0 <= active < len(items)):
         await callback.answer("Сначала выбери стикер", show_alert=True)
         return
     # Удаляем инстанс и одну запись кода из summary списков (первое вхождение)
+    await _push_edit_snapshot(state)
     sticker_code = items[active].get("code")
     items.pop(active)
-    codes = data.get("stickers") or []
+    codes = list(data.get("stickers") or [])
     if sticker_code in codes:
         codes.remove(sticker_code)
     new_active = None if not items else min(active, len(items) - 1)
@@ -1662,6 +1795,8 @@ async def stickers_back(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "stickers_cancel")
 async def stickers_cancel(callback: CallbackQuery, state: FSMContext):
+    await _ensure_edit_snapshot(state)
+    await _push_edit_snapshot(state)
     await state.update_data({"stickers": [], "sticker_items": [], "active_sticker_index": None, "stickers_planned": False})
     # Отмена — возвращаем макет и настройки в том же сообщении
     await _show_mockup_after_stickers(callback, state)
@@ -1669,17 +1804,37 @@ async def stickers_cancel(callback: CallbackQuery, state: FSMContext):
 
 
 @router.callback_query(F.data == "settings_back")
-async def confirm_or_settings(callback: CallbackQuery):
+async def settings_back(callback: CallbackQuery, state: FSMContext):
+    await state.update_data({"edit_history": None})
     await callback.message.edit_reply_markup(reply_markup=confirm_or_setting_keyboard().as_markup())
+    await callback.answer()
 
 
 @router.callback_query(F.data == "settings")
-async def print_settings(callback: CallbackQuery):
+async def print_settings(callback: CallbackQuery, state: FSMContext):
+    await _ensure_edit_snapshot(state)
     await callback.message.edit_reply_markup(reply_markup=make_settings_keyboard().as_markup())
+
+
+@router.callback_query(F.data == "reset_edit")
+async def reset_edit(callback: CallbackQuery, state: FSMContext):
+    restored = await _restore_edit_snapshot(state)
+    if not restored:
+        await callback.answer("Нет изменений для отката", show_alert=True)
+        return
+    from keyboards.print_processing_keyboards import make_settings_keyboard
+
+    await _show_mockup_after_stickers(
+        callback,
+        state,
+        reply_markup=make_settings_keyboard().as_markup(),
+    )
+    await callback.answer("Изменения отменены", show_alert=False)
 
 
 @router.callback_query(F.data == "delete_bg")
 async def remove_print_bg(callback: CallbackQuery, state: FSMContext):
+    await _ensure_edit_snapshot(state)
     data = await state.get_data()
     user_id = callback.from_user.id
     current_photo_path = data.get("current_zone_photo")
@@ -1700,6 +1855,7 @@ async def remove_print_bg(callback: CallbackQuery, state: FSMContext):
     if bg_deleted[side]:
         await callback.answer("Фон уже удален!")
     else:
+        await _push_edit_snapshot(state)
         bg_deleted[side] = True
         await state.update_data({"bg_deleted": bg_deleted})
         image = image.resize(tuple(size[side]), Image.Resampling.BICUBIC)
@@ -1728,6 +1884,7 @@ async def remove_print_bg(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "restore_bg")
 async def restore_print_bg(callback: CallbackQuery, state: FSMContext):
+    await _ensure_edit_snapshot(state)
     data = await state.get_data()
     user_id = callback.from_user.id
     current_photo_path = data.get("current_zone_photo")
@@ -1746,6 +1903,7 @@ async def restore_print_bg(callback: CallbackQuery, state: FSMContext):
     size = data["size"]
     bg_deleted = data["bg_deleted"]
     bg_deleted[side] = False
+    await _push_edit_snapshot(state)
     await state.update_data({"bg_deleted": bg_deleted})
     zone = data.get("order_zone", "chest")
     image = image.resize(tuple(size[side]), Image.Resampling.BICUBIC)
@@ -1763,12 +1921,14 @@ async def restore_print_bg(callback: CallbackQuery, state: FSMContext):
 
 
 @router.callback_query(F.data == "change_size")
-async def print_size_main(callback: CallbackQuery):
+async def print_size_main(callback: CallbackQuery, state: FSMContext):
+    await _ensure_edit_snapshot(state)
     await callback.message.edit_reply_markup(reply_markup=make_print_size_keyboard().as_markup())
 
 
 @router.callback_query(F.data.in_({"decrease_size", "increase_size"}))
 async def print_size(callback: CallbackQuery, state: FSMContext):
+    await _ensure_edit_snapshot(state)
     data = await state.get_data()
     user_id = callback.from_user.id
     bg_deleted = data["bg_deleted"]
@@ -1815,6 +1975,7 @@ async def print_size(callback: CallbackQuery, state: FSMContext):
         else:
             await callback.answer("Достигнут максимум разрешения изображения")
     if size_changed:
+        await _push_edit_snapshot(state)
         size[side] = new_size
         print_pos[side] = _clamp_position_with_mask(
             print_pos[side][0],
@@ -1841,12 +2002,14 @@ async def print_size(callback: CallbackQuery, state: FSMContext):
 
 
 @router.callback_query(F.data == "move_print")
-async def move_print_main(callback: CallbackQuery):
+async def move_print_main(callback: CallbackQuery, state: FSMContext):
+    await _ensure_edit_snapshot(state)
     await callback.message.edit_reply_markup(reply_markup=make_move_print_keyboard().as_markup())
 
 
 @router.callback_query(F.data.in_({"move_up", "move_down", "move_right", "move_left", "move_centre"}))
 async def move_print(callback: CallbackQuery, state: FSMContext):
+    await _ensure_edit_snapshot(state)
     data = await state.get_data()
     user_id = callback.from_user.id
     bg_deleted = data["bg_deleted"]
@@ -1861,92 +2024,118 @@ async def move_print(callback: CallbackQuery, state: FSMContext):
     item = data["order_type"]
     zone = data.get("order_zone", "chest")
     color = data.get("color")
-    print_pos = data["pos"]
-    angle = data["angle"]
-    size = data["size"]
+    print_pos = deepcopy(data.get("pos") or [[-1, -1], [-1, -1]])
+    angle = list(data.get("angle") or [0, 0])
+    size = deepcopy(data.get("size") or [[0, 0], [0, 0]])
     
     current_pos = print_pos[side]
     if not isinstance(current_pos, list) or current_pos[0] == -1:
         await callback.answer("Нет активного принта", show_alert=True)
         return
-
-    def _apply_shift(delta_x: int, delta_y: int) -> bool:
-        current = print_pos[side]
-        target = _clamp_position_with_mask(
-            current[0] + delta_x,
-            current[1] + delta_y,
+    target_pos = current_pos
+    if callback.data == "move_right":
+        candidate = _clamp_position_with_mask(
+            current_pos[0] + size_step,
+            current_pos[1],
             size[side][0],
             size[side][1],
             item,
             side,
             zone,
         )
-        if target[0] != current[0] or target[1] != current[1]:
-            print_pos[side] = target
-            return True
-        return False
-
-    pos_changed = False
-    if callback.data == "move_right":
-        pos_changed = _apply_shift(size_step, 0)
-        if not pos_changed:
+        if candidate == current_pos:
             await callback.answer("Достигнут максимум сдвига вправо")
             return
+        target_pos = candidate
     elif callback.data == "move_left":
-        pos_changed = _apply_shift(-size_step, 0)
-        if not pos_changed:
+        candidate = _clamp_position_with_mask(
+            current_pos[0] - size_step,
+            current_pos[1],
+            size[side][0],
+            size[side][1],
+            item,
+            side,
+            zone,
+        )
+        if candidate == current_pos:
             await callback.answer("Достигнут максимум сдвига влево")
             return
+        target_pos = candidate
     elif callback.data == "move_up":
-        pos_changed = _apply_shift(0, -size_step)
-        if not pos_changed:
+        candidate = _clamp_position_with_mask(
+            current_pos[0],
+            current_pos[1] - size_step,
+            size[side][0],
+            size[side][1],
+            item,
+            side,
+            zone,
+        )
+        if candidate == current_pos:
             await callback.answer("Достигнут максимум сдвига вверх")
             return
+        target_pos = candidate
     elif callback.data == "move_down":
-        pos_changed = _apply_shift(0, size_step)
-        if not pos_changed:
+        candidate = _clamp_position_with_mask(
+            current_pos[0],
+            current_pos[1] + size_step,
+            size[side][0],
+            size[side][1],
+            item,
+            side,
+            zone,
+        )
+        if candidate == current_pos:
             await callback.answer("Достигнут максимум сдвига вниз")
             return
+        target_pos = candidate
     elif callback.data == "move_centre":
         rotations = angle[side] % 180
         effective_width = size[side][0] if rotations == 0 else size[side][1]
         effective_height = size[side][1] if rotations == 0 else size[side][0]
-        target = _get_centered_position_in_zone(item, side, zone, effective_width, effective_height)
-        if target != print_pos[side]:
-            print_pos[side] = target
-            pos_changed = True
-        else:
+        candidate = _get_centered_position_in_zone(
+            item, side, zone, effective_width, effective_height
+        )
+        if candidate == current_pos:
             await callback.answer("Изображение находится в центре")
             return
+        target_pos = candidate
     else:
         await callback.answer()
         return
-    if pos_changed:
-        image = image.resize(tuple(size[side]), Image.Resampling.BICUBIC)
-        template_override = _get_template_override_path(data, side)
-        
-        # Сначала архивные, потом текущее фото
-        base = paste(None, color, "deleted", item, side, 0, False, zone, template_override=template_override)
-        data = await state.get_data()
-        base = _apply_archived_prints_overlay(base, data, item, zone, side, color)
-        base = _overlay_current_print(base, image, print_pos[side], angle[side], item, side, zone)
-        base = _apply_stickers_overlay(base, data, side)
-        file = image_to_bytes(base)
-        await state.update_data({"pos": print_pos})
-        file = InputMediaPhoto(media=file)
-        try:
-            await callback.message.edit_media(file, reply_markup=make_move_print_keyboard().as_markup())
-        except TelegramBadRequest:
-            await callback.answer("Изображение находится в центре")
+
+    await _push_edit_snapshot(state)
+    print_pos[side] = list(target_pos)
+
+    image = image.resize(tuple(size[side]), Image.Resampling.BICUBIC)
+    template_override = _get_template_override_path(data, side)
+
+    # Сначала архивные, потом текущее фото
+    base = paste(None, color, "deleted", item, side, 0, False, zone, template_override=template_override)
+    data = await state.get_data()
+    base = _apply_archived_prints_overlay(base, data, item, zone, side, color)
+    base = _overlay_current_print(base, image, print_pos[side], angle[side], item, side, zone)
+    base = _apply_stickers_overlay(base, data, side)
+    file = image_to_bytes(base)
+    await state.update_data({"pos": print_pos})
+    file = InputMediaPhoto(media=file)
+    try:
+        await callback.message.edit_media(file, reply_markup=make_move_print_keyboard().as_markup())
+    except TelegramBadRequest:
+        await callback.answer("Изображение находится в центре")
+    else:
+        await callback.answer()
 
 
 @router.callback_query(F.data == "rotate_print")
-async def rotate_print_main(callback: CallbackQuery):
+async def rotate_print_main(callback: CallbackQuery, state: FSMContext):
+    await _ensure_edit_snapshot(state)
     await callback.message.edit_reply_markup(reply_markup=make_rotate_keyboard().as_markup())
 
 
 @router.callback_query(F.data.in_({"rotate_right", "rotate_left"}))
 async def rotate_print(callback: CallbackQuery, state: FSMContext):
+    await _ensure_edit_snapshot(state)
     data = await state.get_data()
     user_id = callback.from_user.id
     bg_deleted = data["bg_deleted"]
@@ -1960,9 +2149,10 @@ async def rotate_print(callback: CallbackQuery, state: FSMContext):
     
     item = data["order_type"]
     color = data.get("color")
-    print_pos = data["pos"]
-    angle = data["angle"]
-    size = data["size"]
+    print_pos = deepcopy(data.get("pos") or [[-1, -1], [-1, -1]])
+    angle = list(data.get("angle") or [0, 0])
+    size = deepcopy(data.get("size") or [[0, 0], [0, 0]])
+    await _push_edit_snapshot(state)
     if callback.data == "rotate_right":
         angle[side] = angle[side] + 270
     else:
@@ -1989,6 +2179,7 @@ async def change_side(callback: CallbackQuery, state: FSMContext):
     Вместо простого переключения front/back показываем выбор стороны/зоны
     в зависимости от типа изделия (худи, свитшот, футболка и т.п.).
     """
+    await _ensure_edit_snapshot(state)
     data = await state.get_data()
     item = data.get("order_type")
     if not item:
@@ -2042,20 +2233,23 @@ async def change_side_zone(callback: CallbackQuery, state: FSMContext):
     Переключение на другую сторону/зону из настроек.
     Пересчитываем позицию и показываем новый макет.
     """
+    await _ensure_edit_snapshot(state)
     new_zone = callback.data.replace("side_zone_", "")
     data = await state.get_data()
     user_id = callback.from_user.id
     item = data["order_type"]
     color = data.get("color")
-    bg_deleted = data["bg_deleted"]
-    print_pos = data["pos"]
-    angle = data["angle"]
-    size = data["size"]
+    bg_deleted = list(data.get("bg_deleted") or [False, False])
+    print_pos = deepcopy(data.get("pos") or [[-1, -1], [-1, -1]])
+    angle = list(data.get("angle") or [0, 0])
+    size = deepcopy(data.get("size") or [[0, 0], [0, 0]])
 
     # Сторона, с которой мы уходим
     old_side = data.get("side", 0)
     # Новая сторона для выбранной зоны (грудь/спина/остальные)
     side = _zone_to_side(new_zone)
+
+    await _push_edit_snapshot(state)
 
     # Отключаем принт на старой стороне, если он там был
     if isinstance(print_pos[old_side], list):
@@ -2108,16 +2302,18 @@ async def change_side_zone(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "delete_print")
 async def delete_print(callback: CallbackQuery, state: FSMContext):
+    await _ensure_edit_snapshot(state)
     data = await state.get_data()
     item = data["order_type"]
     color = data.get("color")
     side = data["side"]
-    print_pos = data["pos"]
-    bg_deleted = data["bg_deleted"]
-    angle = data["angle"]
+    print_pos = deepcopy(data.get("pos") or [[-1, -1], [-1, -1]])
+    bg_deleted = list(data.get("bg_deleted") or [False, False])
+    angle = list(data.get("angle") or [0, 0])
     if print_pos[side] == "deleted":
         await callback.answer("Нечего удалять!")
     else:
+        await _push_edit_snapshot(state)
         print_pos[side] = "deleted"
         zone = data.get("order_zone", "chest")
         template_override = _get_template_override_path(data, side)
@@ -2369,7 +2565,13 @@ async def confirm_print(callback: CallbackQuery, state: FSMContext):
     
     # Сохраняем все зоны и помечаем текущий принт как архивированный,
     # чтобы _archive_current_print не добавлял его повторно при preview_more
-    await state.update_data({"zone_prints": zone_prints, "current_print_archived": True})
+    await state.update_data(
+        {
+            "zone_prints": zone_prints,
+            "current_print_archived": True,
+            "edit_history": None,
+        }
+    )
     
     # Генерируем макеты для каждой зоны
     media_files = []
@@ -2619,6 +2821,7 @@ async def preview_more(callback: CallbackQuery, state: FSMContext):
     await _archive_current_print(state)
     data = await state.get_data()
     zones = zone_schemes.get(get_base_item(data.get("order_type")), zone_schemes["shirt"])
+    await state.update_data({"zone_return": "preview"})
     # Редактируем текущее сообщение вместо отправки нового
     try:
         await callback.message.edit_text("Выбери новую зону нанесения 👇", reply_markup=make_zone_keyboard(zones).as_markup())
@@ -2707,6 +2910,7 @@ async def edit_back(callback: CallbackQuery):
 
 @router.callback_query(F.data == "edit_settings")
 async def edit_settings(callback: CallbackQuery, state: FSMContext):
+    await _ensure_edit_snapshot(state)
     data = await state.get_data()
     user_id = callback.from_user.id
     bg_deleted = data["bg_deleted"]
@@ -2750,6 +2954,7 @@ async def edit_stickers(callback: CallbackQuery, state: FSMContext):
     """
     Переход в режим выбора/редактирования стикеров из настроек принта.
     """
+    await _ensure_edit_snapshot(state)
     data = await state.get_data()
     items = data.get("sticker_items") or []
     if items:

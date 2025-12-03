@@ -29,6 +29,10 @@ def make_settings_keyboard():
         callback_data="delete_print"
     ))
     builder.add(InlineKeyboardButton(
+        text="Отменить изменения",
+        callback_data="reset_edit"
+    ))
+    builder.add(InlineKeyboardButton(
         text="Стикеры",
         callback_data="edit_stickers"
     ))
@@ -36,7 +40,7 @@ def make_settings_keyboard():
         text="Назад",
         callback_data="settings_back"
     ))
-    builder.adjust(2, 2, 2, 1, 1)
+    builder.adjust(2, 2, 2, 1, 1, 1)
     return builder
 
 

@@ -7,6 +7,7 @@ def make_type_keyboard(items: dict[str, str]) -> InlineKeyboardBuilder:
     for item, code in items.items():
         builder.add(InlineKeyboardButton(text=str(item), callback_data=str(code)))
     builder.adjust(2)
+    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main"))
     return builder
 
 
@@ -15,6 +16,7 @@ def make_sizes_keyboard(sizes: list[str]) -> InlineKeyboardBuilder:
     for size in sizes:
         builder.add(InlineKeyboardButton(text=size, callback_data=f"size_{size.lower()}"))
     builder.adjust(3)
+    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_items"))
     return builder
 
 
@@ -22,7 +24,7 @@ def make_zone_keyboard(zones: list[tuple[str, str]]) -> InlineKeyboardBuilder:
     builder = InlineKeyboardBuilder()
     for text, code in zones:
         builder.add(InlineKeyboardButton(text=text, callback_data=f"zone_{code}"))
-    builder.add(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_items"))
+    builder.add(InlineKeyboardButton(text="🔙 Назад", callback_data="back_zone"))
     builder.adjust(2)
     return builder
 
