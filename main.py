@@ -39,7 +39,9 @@ async def main():
     dp.include_router(admin_handlers.router)
 
     bot_commands = [
-        BotCommand(command="/menu", description="Новый заказ")
+        BotCommand(command="/menu", description="Новый заказ"),
+        BotCommand(command="/designs", description="Готовые дизайны AIVADOG"),
+        BotCommand(command="/info", description="Инфо о бренде")
     ]
     await bot.set_my_commands(bot_commands)
     # await create_start_link(bot, "shirt")

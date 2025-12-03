@@ -665,6 +665,57 @@ async def cmd_start(message: Message, state: FSMContext):
     })
 
 
+@router.message(Command("designs"))
+async def cmd_designs(message: Message, state: FSMContext):
+    if not designs_available():
+        await message.answer(text="Галерея готовых дизайнов скоро появится, а пока можно сразу выбрать изделие 👇",
+                             reply_markup=make_back_to_main_keyboard().as_markup())
+        return
+
+    await state.clear()
+
+    # Удаляем все файлы пользователя при начале нового взаимодействия
+    _cleanup_user_files(message.from_user.id)
+
+    storage.upsert_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
+    user_row = storage.get_user_by_tg(message.from_user.id)
+    if user_row:
+        storage.set_subscription(user_row["id"], True)
+    chat_id = message.chat.id
+
+    await state.update_data({
+        "chat_id": chat_id,
+        "pos": [[-1, -1], [-1, -1]],
+        "side": 0,
+        "stickers": [],
+        "sticker_items": [],
+        "active_sticker_index": None,
+        "preferred_customization": None,
+        "selected_design_id": None,
+        "selected_design_title": None,
+        "template_overrides": [None, None],
+        "applied_photos": 0,
+        "applied_stickers": [],
+        "zone_prints": {},
+        "all_zones": [],
+    })
+
+    await send_design_card(message, 0, "example")
+
+
+@router.message(Command("info"))
+async def cmd_info(message: Message):
+    text = (
+        "AIVADOG – бренд, созданный из любви к питомцам\n\n"
+        "Мы создаём одежду и аксессуары с уникальными принтами питомцев, чтобы ваш любимец всегда был рядом с вами, "
+        "ведь каждый день с питомцем – это радость, уют и маленькие моменты, которые делают жизнь ярче\n\n"
+        "С любовью к деталям, этике и качеству – каждый дизайн проходит ручную доработку, печать делается с вниманием к материалам и цветам\n\n"
+        "Мы верим, что любовь к нашим хвостикам можно носить с собой – на худи, футболке, на брелке или шоппере\n\n"
+        "AIVADOG – это не просто одежда, а способ показать, как сильно вы связаны со своим любимцем ❤️"
+    )
+    await message.answer(text=text)
+
+
 @router.message(CommandStart(deep_link=False))
 async def start_default(message: Message, state: FSMContext):
     await cmd_start(message, state)
