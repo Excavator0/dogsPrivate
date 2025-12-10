@@ -35,7 +35,7 @@ def make_customization_keyboard(show_ready_design: bool = False) -> InlineKeyboa
     if show_ready_design:
         builder.add(InlineKeyboardButton(text="Готовый дизайн AIVADOG", callback_data="custom_ready"))
     builder.add(InlineKeyboardButton(text="Фото питомца без дизайна", callback_data="custom_photo"))
-    builder.add(InlineKeyboardButton(text="Добавить стикеры", callback_data="custom_stickers"))
+    builder.add(InlineKeyboardButton(text="Добавить стикеры/надписи", callback_data="custom_stickers"))
     builder.adjust(1)
     builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_zones"))
     return builder

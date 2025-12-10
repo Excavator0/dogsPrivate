@@ -203,6 +203,7 @@ async def customization_selected(callback: CallbackQuery, state: FSMContext):
     update_payload = {
         "customization": choice,
         "stickers_planned": choice == "stickers",
+        "stickers_flow_active": choice == "stickers",
     }
     # Если пользователь уходит с готового дизайна на фото/стикеры — очищаем выбранный макет
     if choice != "ready":
@@ -213,6 +214,8 @@ async def customization_selected(callback: CallbackQuery, state: FSMContext):
                 "preferred_customization": None,
             }
         )
+        if choice != "stickers":
+            update_payload["stickers_flow_active"] = False
     await state.update_data(update_payload)
     await callback.answer()
     if choice == "ready":
@@ -220,6 +223,10 @@ async def customization_selected(callback: CallbackQuery, state: FSMContext):
         start_index = DESIGN_INDEX.get(data.get("selected_design_id"), 0)
         await _prompt_ready_design_selection(callback, state, start_index)
         await callback.message.delete()
+        return
+    if choice == "stickers":
+        await callback.answer()
+        await _start_sticker_flow(callback, state)
         return
     await callback.message.delete()
     await callback.message.answer(
@@ -1040,39 +1047,49 @@ async def _send_initial_mockup(message: Message, state: FSMContext):
     # Путь к фото для текущей зоны
     current_photo_path = data.get("current_zone_photo")
 
+    image = None
+    has_image = False
     customization = data.get("customization", "photo")
-    if customization == "ready" and data.get("selected_design_id"):
-        design = find_design(data["selected_design_id"])
-        from services.designs import _build_preview
-        design_path = _build_preview(design) if design else None
-        if design_path:
-            image = Image.open(design_path)
-        elif current_photo_path and os.path.exists(current_photo_path):
-            image = Image.open(current_photo_path)
+    try:
+        if customization == "ready" and data.get("selected_design_id"):
+            design = find_design(data["selected_design_id"])
+            from services.designs import _build_preview
+            design_path = _build_preview(design) if design else None
+            if design_path:
+                image = Image.open(design_path)
+            elif current_photo_path and os.path.exists(current_photo_path):
+                image = Image.open(current_photo_path)
+            else:
+                image = Image.open(f"prints/{user_id}.png")
         else:
-            image = Image.open(f"prints/{user_id}.png")
-    else:
-        # Используем фото для текущей зоны
-        if current_photo_path and os.path.exists(current_photo_path):
-            if bg_deleted[side]:
-                # Проверяем версию без фона
-                bg_deleted_path = current_photo_path.replace(".png", "_nobg.png")
-                if os.path.exists(bg_deleted_path):
-                    image = Image.open(bg_deleted_path)
+            # Используем фото для текущей зоны
+            if current_photo_path and os.path.exists(current_photo_path):
+                if bg_deleted[side]:
+                    # Проверяем версию без фона
+                    bg_deleted_path = current_photo_path.replace(".png", "_nobg.png")
+                    if os.path.exists(bg_deleted_path):
+                        image = Image.open(bg_deleted_path)
+                    else:
+                        image = Image.open(current_photo_path)
                 else:
                     image = Image.open(current_photo_path)
+            elif bg_deleted[side] and os.path.exists(f"prints/{user_id}_bg_deleted.png"):
+                image = Image.open(f"prints/{user_id}_bg_deleted.png")
             else:
-                image = Image.open(current_photo_path)
-        elif bg_deleted[side] and os.path.exists(f"prints/{user_id}_bg_deleted.png"):
-            image = Image.open(f"prints/{user_id}_bg_deleted.png")
-        else:
-            image = Image.open(f"prints/{user_id}.png")
+                image = Image.open(f"prints/{user_id}.png")
+        has_image = True
+    except FileNotFoundError:
+        image = None
+        has_image = False
 
-    # Если размеры ещё не были сохранены, используем исходный размер изображения
-    if not size[side] or size[side][0] == 0 or size[side][1] == 0:
-        size[side] = list(image.size)
-
-    image = image.resize(tuple(size[side]), Image.Resampling.BICUBIC)
+    # Если размеров нет, а фото нет — оставляем нули; если фото есть — подставляем его размер
+    if has_image:
+        if not size[side] or size[side][0] == 0 or size[side][1] == 0:
+            size[side] = list(image.size)
+        image = image.resize(tuple(size[side]), Image.Resampling.BICUBIC)
+    else:
+        if not size[side]:
+            size[side] = [0, 0]
     template_override = _get_template_override_path(data, side)
     
     # Сначала накладываем архивные принты на пустой шаблон
@@ -1080,14 +1097,15 @@ async def _send_initial_mockup(message: Message, state: FSMContext):
     base = _apply_archived_prints_overlay(base, data, item, zone, side, color)
     
     # Затем накладываем текущее фото поверх
-    base = _overlay_current_print(base, image, print_pos[side], angle[side], item, side, zone)
+    if has_image:
+        base = _overlay_current_print(base, image, print_pos[side], angle[side], item, side, zone)
     
-    base = _apply_stickers_overlay(base, data, side)
+    base = _apply_stickers_overlay(base, data, item, zone, side)
     file = image_to_bytes(base)
     await message.answer_photo(file, reply_markup=confirm_or_setting_keyboard().as_markup())
 
 
-def _apply_stickers_overlay(base_image: Image.Image, data: dict, side: int) -> Image.Image:
+def _apply_stickers_overlay(base_image: Image.Image, data: dict, item: str, zone: str, side: int) -> Image.Image:
     """
     Накладывает выбранные стикеры на итоговый макет для нужной стороны.
     """
@@ -1096,10 +1114,11 @@ def _apply_stickers_overlay(base_image: Image.Image, data: dict, side: int) -> I
         return base_image
     composed = base_image.copy()
     width, height = composed.size
-    for idx, item in enumerate(sticker_items):
-        if item.get("side", 0) != side:
+    zone_mask = _get_zone_mask_for_overlay(item, side, zone, composed.size)
+    for idx, item_data in enumerate(sticker_items):
+        if item_data.get("side", 0) != side:
             continue
-        code = item.get("code")
+        code = item_data.get("code")
         path = get_sticker_path(code)
         if not path or not path.exists():
             continue
@@ -1107,18 +1126,31 @@ def _apply_stickers_overlay(base_image: Image.Image, data: dict, side: int) -> I
             sticker = Image.open(path).convert("RGBA")
         except Exception:
             continue
-        size = item.get("size")
-        angle = int(item.get("angle", 0)) % 360
-        pos = item.get("pos") or [0, 0]
+        size = item_data.get("size")
+        angle = int(item_data.get("angle", 0)) % 360
+        pos = item_data.get("pos") or [0, 0]
         if size and size[0] > 0 and size[1] > 0:
             sticker = sticker.resize(tuple(size), Image.Resampling.BICUBIC)
         if angle:
             sticker = sticker.rotate(angle, expand=True)
-        # Пеpестрахуем позицию в пределах шаблона
-        x = max(0, min(pos[0], width - 1))
-        y = max(0, min(pos[1], height - 1))
-        # Накладываем с сохранением альфы
-        composed.paste(sticker, (x, y), sticker)
+        # Ограничиваем позицию по маске зоны
+        x, y = _clamp_position_with_mask(
+            pos[0],
+            pos[1],
+            sticker.size[0],
+            sticker.size[1],
+            item,
+            side,
+            zone,
+        )
+        # Накладываем с сохранением альфы и маской зоны
+        sticker_layer = Image.new("RGBA", composed.size, (0, 0, 0, 0))
+        sticker_layer.paste(sticker, (x, y), sticker)
+        if zone_mask:
+            masked_layer = Image.new("RGBA", composed.size, (0, 0, 0, 0))
+            masked_layer.paste(sticker_layer, (0, 0), zone_mask)
+            sticker_layer = masked_layer
+        composed = Image.alpha_composite(composed, sticker_layer)
     return composed
 
 
@@ -1237,7 +1269,7 @@ def _apply_archived_prints_overlay(base_image: Image.Image, data: dict, item: st
     # Накладываем стикеры из архива
     archived_sticker_items = zone_data.get("sticker_items", [])
     if archived_sticker_items:
-        composed = _apply_stickers_to_mockup(composed, archived_sticker_items)
+        composed = _apply_stickers_to_mockup(composed, archived_sticker_items, item, zone, side)
     
     return composed
 
@@ -1261,37 +1293,48 @@ async def _show_mockup_after_stickers(callback: CallbackQuery, state: FSMContext
     # Путь к фото для текущей зоны
     current_photo_path = data.get("current_zone_photo")
 
+    image = None
+    has_image = False
     customization = data.get("customization", "photo")
-    if customization == "ready" and data.get("selected_design_id"):
-        design = find_design(data["selected_design_id"])
-        from services.designs import _build_preview
-        design_path = _build_preview(design) if design else None
-        if design_path:
-            image = Image.open(design_path)
-        elif current_photo_path and os.path.exists(current_photo_path):
-            image = Image.open(current_photo_path)
+    try:
+        if customization == "ready" and data.get("selected_design_id"):
+            design = find_design(data["selected_design_id"])
+            from services.designs import _build_preview
+            design_path = _build_preview(design) if design else None
+            if design_path:
+                image = Image.open(design_path)
+            elif current_photo_path and os.path.exists(current_photo_path):
+                image = Image.open(current_photo_path)
+            else:
+                image = Image.open(f"prints/{user_id}.png")
         else:
-            image = Image.open(f"prints/{user_id}.png")
-    else:
-        # Используем фото для текущей зоны
-        if current_photo_path and os.path.exists(current_photo_path):
-            if bg_deleted[side]:
-                bg_deleted_path = current_photo_path.replace(".png", "_nobg.png")
-                if os.path.exists(bg_deleted_path):
-                    image = Image.open(bg_deleted_path)
+            # Используем фото для текущей зоны, если оно есть
+            if current_photo_path and os.path.exists(current_photo_path):
+                if bg_deleted[side]:
+                    bg_deleted_path = current_photo_path.replace(".png", "_nobg.png")
+                    if os.path.exists(bg_deleted_path):
+                        image = Image.open(bg_deleted_path)
+                    else:
+                        image = Image.open(current_photo_path)
                 else:
                     image = Image.open(current_photo_path)
+            elif bg_deleted[side] and os.path.exists(f"prints/{user_id}_bg_deleted.png"):
+                image = Image.open(f"prints/{user_id}_bg_deleted.png")
             else:
-                image = Image.open(current_photo_path)
-        elif bg_deleted[side] and os.path.exists(f"prints/{user_id}_bg_deleted.png"):
-            image = Image.open(f"prints/{user_id}_bg_deleted.png")
-        else:
-            image = Image.open(f"prints/{user_id}.png")
+                image = Image.open(f"prints/{user_id}.png")
+        has_image = True
+    except FileNotFoundError:
+        image = None
+        has_image = False
 
-    if not size[side] or size[side][0] == 0 or size[side][1] == 0:
-        size[side] = list(image.size)
-
-    image = image.resize(tuple(size[side]), Image.Resampling.BICUBIC)
+    if has_image:
+        if not size[side] or size[side][0] == 0 or size[side][1] == 0:
+            size[side] = list(image.size)
+        image = image.resize(tuple(size[side]), Image.Resampling.BICUBIC)
+    else:
+        # Если фото нет — оставляем размер по умолчанию
+        if not size[side]:
+            size[side] = [0, 0]
     template_override = _get_template_override_path(data, side)
     
     # Сначала накладываем архивные принты на пустой шаблон
@@ -1299,9 +1342,10 @@ async def _show_mockup_after_stickers(callback: CallbackQuery, state: FSMContext
     base = _apply_archived_prints_overlay(base, data, item, zone, side, color)
     
     # Затем накладываем текущее фото поверх
-    base = _overlay_current_print(base, image, print_pos[side], angle[side], item, side, zone)
+    if has_image:
+        base = _overlay_current_print(base, image, print_pos[side], angle[side], item, side, zone)
     
-    base = _apply_stickers_overlay(base, data, side)
+    base = _apply_stickers_overlay(base, data, item, zone, side)
     file = image_to_bytes(base)
     media = InputMediaPhoto(media=file, caption=None)
     if reply_markup is None:
@@ -1336,8 +1380,33 @@ async def _start_sticker_flow(target, state: FSMContext):
                 reply_markup=make_sticker_categories_keyboard(categories).as_markup()
             )
         except TelegramBadRequest:
-            pass
+            # Если сообщение без медиа — редактируем текст
+            try:
+                await target.message.edit_text(text)
+                await target.message.edit_reply_markup(
+                    reply_markup=make_sticker_categories_keyboard(categories).as_markup()
+                )
+            except TelegramBadRequest:
+                pass
     await state.set_state(Order.sticker_category)
+
+
+def _make_sticker_flow_main_keyboard() -> InlineKeyboardBuilder:
+    """
+    Главная клавиатура после добавления первого стикера
+    для пути «стикер/надпись без фото».
+    """
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="Продолжить", callback_data="confirm"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="Настройки", callback_data="stickers_flow_settings"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="🔙 Назад к выбору", callback_data="stickers_flow_back"),
+    )
+    return builder
 
 
 async def _show_order_summary(message: Message, state: FSMContext, edit: bool = False):
@@ -1564,10 +1633,15 @@ async def sticker_browse(callback: CallbackQuery, state: FSMContext):
             "side": side,
         })
         active_index = len(sticker_items) - 1
-        await state.update_data({"stickers": stickers, "sticker_items": sticker_items, "active_sticker_index": active_index})
-        # Переходим в меню редактирования стикеров в том же сообщении
-        from keyboards.print_processing_keyboards import make_stickers_manage_keyboard
-        await _show_mockup_after_stickers(callback, state, reply_markup=make_stickers_manage_keyboard(active_index, len(sticker_items)).as_markup())
+        await state.update_data(
+            {
+                "stickers": stickers,
+                "sticker_items": sticker_items,
+                "active_sticker_index": active_index,
+                "stickers_flow_active": True,
+            }
+        )
+        await _show_mockup_after_stickers(callback, state, reply_markup=_make_sticker_flow_main_keyboard().as_markup())
         await callback.answer("Стикер добавлен ✅", show_alert=False)
         return
 
@@ -1597,6 +1671,33 @@ async def sticker_browse(callback: CallbackQuery, state: FSMContext):
         # На всякий случай, если Telegram не позволяет изменить медиа
         await callback.answer()
 
+
+@router.callback_query(F.data == "stickers_flow_settings")
+async def stickers_flow_settings(callback: CallbackQuery, state: FSMContext):
+    """Открывает управление стикерами из главной клавиатуры стикеров."""
+    from keyboards.print_processing_keyboards import make_stickers_manage_keyboard
+    data = await state.get_data()
+    items = data.get("sticker_items") or []
+    active = data.get("active_sticker_index")
+    await state.update_data({"stickers_flow_active": True})
+    await _show_mockup_after_stickers(callback, state, reply_markup=make_stickers_manage_keyboard(active, len(items)).as_markup())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "stickers_flow_back")
+async def stickers_flow_back(callback: CallbackQuery, state: FSMContext):
+    """Возврат к выбору категории стикеров из главной клавиатуры стикеров."""
+    await state.update_data(
+        {
+            "stickers": [],
+            "sticker_items": [],
+            "active_sticker_index": None,
+            "stickers_flow_active": True,
+            "edit_history": None,
+        }
+    )
+    await _start_sticker_flow(callback, state)
+    await callback.answer()
 
 # === Редактирование добавленных стикеров ===
 @router.callback_query(F.data == "st_manage")
@@ -1664,41 +1765,54 @@ async def sticker_move(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Сначала выбери стикер", show_alert=True)
         return
     item_code = data.get("order_type")
-    template_width, template_height = get_template_bounds(item_code)
+    zone = data.get("order_zone", "chest")
     sticker = deepcopy(items[active])
     pos = list(sticker.get("pos") or [0, 0])
     size = list(sticker.get("size") or [100, 100])
     angle = int(sticker.get("angle", 0))
+    side = sticker.get("side", data.get("side", 0))
     changed = False
+    dx = dy = 0
     if callback.data == "st_move_right":
-        if (pos[0] + size_step) < template_width:
-            pos[0] += size_step
-            changed = True
+        dx = size_step
     elif callback.data == "st_move_left":
-        if (pos[0] - size_step) > 0:
-            pos[0] -= size_step
-            changed = True
+        dx = -size_step
     elif callback.data == "st_move_up":
-        if (pos[1] - size_step) > 0:
-            pos[1] -= size_step
-            changed = True
+        dy = -size_step
     elif callback.data == "st_move_down":
-        if (pos[1] + size_step) < template_height:
-            pos[1] += size_step
-            changed = True
+        dy = size_step
     elif callback.data == "st_move_centre":
         # учитываем поворот на 90/270
         rotations = angle % 180
-        if rotations == 0:
-            pos[0] = (template_width - size[0]) // 2
-            pos[1] = (template_height - size[1]) // 2
-        else:
-            pos[0] = (template_width - size[1]) // 2
-            pos[1] = (template_height - size[0]) // 2
+        eff_w = size[0] if rotations == 0 else size[1]
+        eff_h = size[1] if rotations == 0 else size[0]
+        pos = list(
+            _get_centered_position_in_zone(
+                item_code,
+                side,
+                zone,
+                eff_w,
+                eff_h,
+            )
+        )
         changed = True
+    if dx or dy:
+        candidate = _clamp_position_with_mask(
+            pos[0] + dx,
+            pos[1] + dy,
+            size[0],
+            size[1],
+            item_code,
+            side,
+            zone,
+        )
+        if candidate != pos:
+            pos = list(candidate)
+            changed = True
     if changed:
         await _push_edit_snapshot(state)
         sticker["pos"] = pos
+        sticker["side"] = side
         items[active] = sticker
         await state.update_data({"sticker_items": items})
         await _show_mockup_after_stickers(callback, state, reply_markup=make_sticker_move_keyboard().as_markup())
@@ -1724,10 +1838,15 @@ async def sticker_size(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Сначала выбери стикер", show_alert=True)
         return
     item_code = data.get("order_type")
-    template_width, template_height = get_template_bounds(item_code)
+    zone = data.get("order_zone", "chest")
     sticker = deepcopy(items[active])
+    side = sticker.get("side", data.get("side", 0))
     size = list(sticker.get("size") or [100, 100])
+    pos = list(sticker.get("pos") or [0, 0])
     x_size, y_size = size
+    x_min, y_min, x_max, y_max = _get_zone_mask_bbox(item_code, side, zone)
+    max_width = max(1, x_max - x_min)
+    max_height = max(1, y_max - y_min)
     changed = False
     if callback.data == "st_decrease_size":
         decrease_k = 5 / 6
@@ -1738,7 +1857,7 @@ async def sticker_size(callback: CallbackQuery, state: FSMContext):
             await callback.answer("Достигнут минимум размера стикера")
     else:
         increase_k = 1.2
-        if (x_size * increase_k < template_width) and (y_size * increase_k < template_height):
+        if (x_size * increase_k < max_width) and (y_size * increase_k < max_height):
             size = [int(x_size * increase_k), int(y_size * increase_k)]
             changed = True
         else:
@@ -1746,6 +1865,19 @@ async def sticker_size(callback: CallbackQuery, state: FSMContext):
     if changed:
         await _push_edit_snapshot(state)
         sticker["size"] = size
+        pos = list(
+            _clamp_position_with_mask(
+                pos[0],
+                pos[1],
+                size[0],
+                size[1],
+                item_code,
+                side,
+                zone,
+            )
+        )
+        sticker["pos"] = pos
+        sticker["side"] = side
         items[active] = sticker
         await state.update_data({"sticker_items": items})
         await _show_mockup_after_stickers(callback, state, reply_markup=make_sticker_size_keyboard().as_markup())
@@ -1857,7 +1989,11 @@ async def stickers_cancel(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "settings_back")
 async def settings_back(callback: CallbackQuery, state: FSMContext):
     await state.update_data({"edit_history": None})
-    await callback.message.edit_reply_markup(reply_markup=confirm_or_setting_keyboard().as_markup())
+    data = await state.get_data()
+    if data.get("stickers_flow_active"):
+        await callback.message.edit_reply_markup(reply_markup=_make_sticker_flow_main_keyboard().as_markup())
+    else:
+        await callback.message.edit_reply_markup(reply_markup=confirm_or_setting_keyboard().as_markup())
     await callback.answer()
 
 
@@ -1927,7 +2063,7 @@ async def remove_print_bg(callback: CallbackQuery, state: FSMContext):
         data = await state.get_data()
         base = _apply_archived_prints_overlay(base, data, item, zone, side, color)
         base = _overlay_current_print(base, image, print_pos[side], angle[side], item, side, zone)
-        base = _apply_stickers_overlay(base, data, side)
+        base = _apply_stickers_overlay(base, data, item, zone, side)
         file = image_to_bytes(base)
         file = InputMediaPhoto(media=file)
         await callback.message.edit_media(file, reply_markup=make_remove_bg_keyboard().as_markup())
@@ -1965,7 +2101,7 @@ async def restore_print_bg(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     base = _apply_archived_prints_overlay(base, data, item, zone, side, color)
     base = _overlay_current_print(base, image, print_pos[side], angle[side], item, side, zone)
-    base = _apply_stickers_overlay(base, data, side)
+    base = _apply_stickers_overlay(base, data, item, zone, side)
     file = image_to_bytes(base)
     file = InputMediaPhoto(media=file)
     await callback.message.edit_media(file, reply_markup=make_settings_keyboard().as_markup())
@@ -2045,7 +2181,7 @@ async def print_size(callback: CallbackQuery, state: FSMContext):
         data = await state.get_data()
         base = _apply_archived_prints_overlay(base, data, item, zone, side, color)
         base = _overlay_current_print(base, image, print_pos[side], angle[side], item, side, zone)
-        base = _apply_stickers_overlay(base, data, side)
+        base = _apply_stickers_overlay(base, data, item, zone, side)
         file = image_to_bytes(base)
         await state.update_data({"size": size, "pos": print_pos})
         file = InputMediaPhoto(media=file)
@@ -2166,7 +2302,7 @@ async def move_print(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     base = _apply_archived_prints_overlay(base, data, item, zone, side, color)
     base = _overlay_current_print(base, image, print_pos[side], angle[side], item, side, zone)
-    base = _apply_stickers_overlay(base, data, side)
+    base = _apply_stickers_overlay(base, data, item, zone, side)
     file = image_to_bytes(base)
     await state.update_data({"pos": print_pos})
     file = InputMediaPhoto(media=file)
@@ -2217,7 +2353,7 @@ async def rotate_print(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     base = _apply_archived_prints_overlay(base, data, item, zone, side, color)
     base = _overlay_current_print(base, image, print_pos[side], angle[side], item, side, zone)
-    base = _apply_stickers_overlay(base, data, side)
+    base = _apply_stickers_overlay(base, data, item, zone, side)
     file = image_to_bytes(base)
     await state.update_data({"angle": angle})
     file = InputMediaPhoto(media=file)
@@ -2335,7 +2471,7 @@ async def change_side_zone(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     base = _apply_archived_prints_overlay(base, data, item, new_zone, side, color)
     base = _overlay_current_print(base, image, print_pos[side], angle[side], item, side, new_zone)
-    base = _apply_stickers_overlay(base, data, side)
+    base = _apply_stickers_overlay(base, data, item, new_zone, side)
     file = image_to_bytes(base)
     media = InputMediaPhoto(media=file)
     await state.update_data(
@@ -2371,7 +2507,7 @@ async def delete_print(callback: CallbackQuery, state: FSMContext):
         base = paste(None, color, print_pos[side], item, side, angle[side], bg_deleted[side], zone, template_override=template_override)
         data = await state.get_data()
         base = _apply_archived_prints_overlay(base, data, item, zone, side, color)
-        base = _apply_stickers_overlay(base, data, side)
+        base = _apply_stickers_overlay(base, data, item, zone, side)
         file = image_to_bytes(base)
         file = InputMediaPhoto(media=file)
         await state.update_data({"pos": print_pos})
@@ -2482,12 +2618,12 @@ def _generate_zone_mockup(user_id: int, item: str, zone: str, zone_data: dict, c
     
     # Накладываем стикеры для этой зоны
     if sticker_items:
-        mockup = _apply_stickers_to_mockup(mockup, sticker_items)
+        mockup = _apply_stickers_to_mockup(mockup, sticker_items, item, zone, side)
     
     return mockup
 
 
-def _apply_stickers_to_mockup(base_image: Image.Image, sticker_items: list) -> Image.Image:
+def _apply_stickers_to_mockup(base_image: Image.Image, sticker_items: list, item: str, zone: str, side: int) -> Image.Image:
     """
     Накладывает стикеры на макет.
     """
@@ -2495,8 +2631,9 @@ def _apply_stickers_to_mockup(base_image: Image.Image, sticker_items: list) -> I
         return base_image
     composed = base_image.copy()
     width, height = composed.size
-    for item in sticker_items:
-        code = item.get("code")
+    zone_mask = _get_zone_mask_for_overlay(item, side, zone, composed.size)
+    for item_data in sticker_items:
+        code = item_data.get("code")
         path = get_sticker_path(code)
         if not path or not path.exists():
             continue
@@ -2504,16 +2641,29 @@ def _apply_stickers_to_mockup(base_image: Image.Image, sticker_items: list) -> I
             sticker = Image.open(path).convert("RGBA")
         except Exception:
             continue
-        size = item.get("size")
-        angle = int(item.get("angle", 0)) % 360
-        pos = item.get("pos") or [0, 0]
+        size = item_data.get("size")
+        angle = int(item_data.get("angle", 0)) % 360
+        pos = item_data.get("pos") or [0, 0]
         if size and size[0] > 0 and size[1] > 0:
             sticker = sticker.resize(tuple(size), Image.Resampling.BICUBIC)
         if angle:
             sticker = sticker.rotate(angle, expand=True)
-        x = max(0, min(pos[0], width - 1))
-        y = max(0, min(pos[1], height - 1))
-        composed.paste(sticker, (x, y), sticker)
+        x, y = _clamp_position_with_mask(
+            pos[0],
+            pos[1],
+            sticker.size[0],
+            sticker.size[1],
+            item,
+            side,
+            zone,
+        )
+        sticker_layer = Image.new("RGBA", composed.size, (0, 0, 0, 0))
+        sticker_layer.paste(sticker, (x, y), sticker)
+        if zone_mask:
+            masked_layer = Image.new("RGBA", composed.size, (0, 0, 0, 0))
+            masked_layer.paste(sticker_layer, (0, 0), zone_mask)
+            sticker_layer = masked_layer
+        composed = Image.alpha_composite(composed, sticker_layer)
     return composed
 
 
@@ -2521,14 +2671,23 @@ def _apply_stickers_to_mockup(base_image: Image.Image, sticker_items: list) -> I
 async def confirm_print(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     user_id = callback.from_user.id
-    bg_deleted = data["bg_deleted"]
-    side = data["side"]
-    item = data["order_type"]
+    bg_deleted = list(data.get("bg_deleted") or [False, False])
+    side = data.get("side", 0)
+    item = data.get("order_type")
     color = data.get("color")
-    print_pos = data["pos"]
-    angle = data["angle"]
-    size = data["size"]
-    size_order = data["order_size"]
+    print_pos = data.get("pos") or [[-1, -1], [-1, -1]]
+    angle = data.get("angle") or [0, 0]
+    size = data.get("size") or [[0, 0], [0, 0]]
+    size_order = data.get("order_size")
+    # Гарантируем наличие индексов для текущей стороны
+    while len(bg_deleted) <= side:
+        bg_deleted.append(False)
+    while len(print_pos) <= side:
+        print_pos.append([-1, -1])
+    while len(angle) <= side:
+        angle.append(0)
+    while len(size) <= side:
+        size.append([0, 0])
     if len(callback.data) > 7:
         change = callback.data[callback.data.index("_") + 1:callback.data.rfind("_")]
         value = callback.data[callback.data.rfind("_") + 1:]
@@ -2621,6 +2780,7 @@ async def confirm_print(callback: CallbackQuery, state: FSMContext):
             "zone_prints": zone_prints,
             "current_print_archived": True,
             "edit_history": None,
+            "stickers_flow_active": False,
         }
     )
     

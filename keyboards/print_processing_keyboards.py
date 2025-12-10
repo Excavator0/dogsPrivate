@@ -148,7 +148,7 @@ def make_side_keyboard(side):
 def make_stickers_manage_keyboard(active_index, total):
     builder = InlineKeyboardBuilder()
     builder.add(InlineKeyboardButton(
-        text="Добавить стикер",
+        text="Добавить стикер/надпись",
         callback_data="st_add_new"
     ))
     builder.add(InlineKeyboardButton(
