@@ -97,6 +97,20 @@ def make_sticker_categories_keyboard(categories: list[tuple[str, str]]) -> Inlin
     return builder
 
 
+def make_main_sticker_categories_keyboard(categories: list[tuple[str, str]]) -> InlineKeyboardBuilder:
+    """
+    Клавиатура выбора категории стикеров.
+    categories: [(title, code), ...]
+    """
+    builder = InlineKeyboardBuilder()
+    for title, code in categories:
+        builder.add(InlineKeyboardButton(text=title, callback_data=f"sticker_cat_{code}"))
+    if categories:
+        builder.adjust(2)
+    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="stickers_back"))
+    return builder
+
+
 def make_sticker_view_keyboard(current_index: int, total: int) -> InlineKeyboardBuilder:
     """
     Клавиатура для просмотра одного стикера:

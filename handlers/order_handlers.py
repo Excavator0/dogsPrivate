@@ -1031,8 +1031,8 @@ async def photo_sent(message: Message):
     await message.answer("Отправьте фото документом, так не потеряется качество изображения")
 
 
-async def _send_initial_mockup(message: Message, state: FSMContext):
-    """Генерирует и отправляет первое фото с макетом после загрузки изображения."""
+async def _send_initial_mockup(message: Message, state: FSMContext, reply_markup=None):
+    """Генерирует и отправляет фото с макетом по текущему состоянию."""
     data = await state.get_data()
     user_id = message.from_user.id
     item = data["order_type"]
@@ -1102,7 +1102,8 @@ async def _send_initial_mockup(message: Message, state: FSMContext):
     
     base = _apply_stickers_overlay(base, data, item, zone, side)
     file = image_to_bytes(base)
-    await message.answer_photo(file, reply_markup=confirm_or_setting_keyboard().as_markup())
+    markup = reply_markup or confirm_or_setting_keyboard().as_markup()
+    await message.answer_photo(file, reply_markup=markup)
 
 
 def _apply_stickers_overlay(base_image: Image.Image, data: dict, item: str, zone: str, side: int) -> Image.Image:
@@ -1401,12 +1402,25 @@ def _make_sticker_flow_main_keyboard() -> InlineKeyboardBuilder:
         InlineKeyboardButton(text="Продолжить", callback_data="confirm"),
     )
     builder.row(
-        InlineKeyboardButton(text="Настройки", callback_data="stickers_flow_settings"),
+        InlineKeyboardButton(text="⚙️Настройки", callback_data="stickers_flow_settings"),
     )
     builder.row(
         InlineKeyboardButton(text="🔙 Назад к выбору", callback_data="stickers_flow_back"),
     )
     return builder
+
+
+def _make_stickers_manage_keyboard(data: dict, active_index, total) -> InlineKeyboardBuilder:
+    """
+    Выбирает нужный callback для кнопки «Назад» в меню управления стикерами
+    в зависимости от пользовательского пути:
+    - sticker-only flow: возвращаемся в меню Продолжить/Настройки/Назад.
+    - photo/design flow: возвращаемся в общее меню редактирования (settings).
+    """
+    from keyboards.print_processing_keyboards import make_stickers_manage_keyboard
+
+    back_callback = "st_manage_back" if data.get("stickers_flow_active") else "settings"
+    return make_stickers_manage_keyboard(active_index, total, back_callback)
 
 
 async def _show_order_summary(message: Message, state: FSMContext, edit: bool = False):
@@ -1474,18 +1488,23 @@ async def _show_order_summary(message: Message, state: FSMContext, edit: bool = 
                 photo_count += 1
     
     # Формируем текст кастомизации с количеством
+    customization = data.get("customization")
+    sticker_only = stickers_total > 0 and photo_count == 0 and design_count == 0
     cust_labels = []
-    if photo_count > 0:
-        label = "Фото питомца"
-        if photo_count > 1:
-            label += f" ×{photo_count}"
-        cust_labels.append(label)
-    if design_count > 0:
-        label = "Готовый дизайн AIVADOG"
-        if design_count > 1:
-            label += f" ×{design_count}"
-        cust_labels.append(label)
-    customization_text = ", ".join(cust_labels) if cust_labels else "Фото питомца"
+    if sticker_only or customization == "stickers":
+        customization_text = "Стикеры"
+    else:
+        if photo_count > 0:
+            label = "Фото питомца"
+            if photo_count > 1:
+                label += f" ×{photo_count}"
+            cust_labels.append(label)
+        if design_count > 0:
+            label = "Готовый дизайн AIVADOG"
+            if design_count > 1:
+                label += f" ×{design_count}"
+            cust_labels.append(label)
+        customization_text = ", ".join(cust_labels) if cust_labels else "Фото питомца"
     
     pet_name = data.get("pet_name", "—")
     
@@ -1525,6 +1544,10 @@ async def pet_name_received(message: Message, state: FSMContext):
     # Если это был вызов после confirm для готового дизайна, показываем summary
     if customization == "ready" and data.get("front_id"):
         await _show_order_summary(message, state)
+        return
+    # Если кастомизация — только стикеры, показываем макет с клавиатурой sticker-flow
+    if customization == "stickers":
+        await _send_initial_mockup(message, state, reply_markup=_make_sticker_flow_main_keyboard().as_markup())
         return
 
     # После того как узнали кличку, показываем первое фото с макетом
@@ -1641,6 +1664,16 @@ async def sticker_browse(callback: CallbackQuery, state: FSMContext):
                 "stickers_flow_active": True,
             }
         )
+        # В sticker-only сценарии сначала спрашиваем имя питомца, потом показываем макет
+        if data.get("customization") == "stickers" and not data.get("pet_name"):
+            await callback.answer("Стикер добавлен ✅", show_alert=False)
+            try:
+                await callback.message.delete()
+            except TelegramBadRequest:
+                pass
+            await callback.message.answer("Как зовут твоего хвостика?")
+            await state.set_state(Order.pet_name)
+            return
         await _show_mockup_after_stickers(callback, state, reply_markup=_make_sticker_flow_main_keyboard().as_markup())
         await callback.answer("Стикер добавлен ✅", show_alert=False)
         return
@@ -1675,12 +1708,16 @@ async def sticker_browse(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "stickers_flow_settings")
 async def stickers_flow_settings(callback: CallbackQuery, state: FSMContext):
     """Открывает управление стикерами из главной клавиатуры стикеров."""
-    from keyboards.print_processing_keyboards import make_stickers_manage_keyboard
     data = await state.get_data()
     items = data.get("sticker_items") or []
     active = data.get("active_sticker_index")
+    data = {**data, "stickers_flow_active": True}
     await state.update_data({"stickers_flow_active": True})
-    await _show_mockup_after_stickers(callback, state, reply_markup=make_stickers_manage_keyboard(active, len(items)).as_markup())
+    await _show_mockup_after_stickers(
+        callback,
+        state,
+        reply_markup=_make_stickers_manage_keyboard(data, active, len(items)).as_markup(),
+    )
     await callback.answer()
 
 
@@ -1702,11 +1739,25 @@ async def stickers_flow_back(callback: CallbackQuery, state: FSMContext):
 # === Редактирование добавленных стикеров ===
 @router.callback_query(F.data == "st_manage")
 async def stickers_manage(callback: CallbackQuery, state: FSMContext):
-    from keyboards.print_processing_keyboards import make_stickers_manage_keyboard
     data = await state.get_data()
     items = data.get("sticker_items") or []
     active = data.get("active_sticker_index")
-    await _show_mockup_after_stickers(callback, state, reply_markup=make_stickers_manage_keyboard(active, len(items)).as_markup())
+    await _show_mockup_after_stickers(
+        callback,
+        state,
+        reply_markup=_make_stickers_manage_keyboard(data, active, len(items)).as_markup(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "st_manage_back")
+async def stickers_manage_back(callback: CallbackQuery, state: FSMContext):
+    """
+    Возврат из настроек стикеров в главное меню sticker-flow
+    (Продолжить / Настройки / Назад к выбору) без захода в общие настройки фото/дизайна.
+    """
+    await state.update_data({"stickers_flow_active": True})
+    await callback.message.edit_reply_markup(reply_markup=_make_sticker_flow_main_keyboard().as_markup())
     await callback.answer()
 
 
@@ -1735,7 +1786,6 @@ async def stickers_select(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("st_pick_"))
 async def sticker_pick(callback: CallbackQuery, state: FSMContext):
-    from keyboards.print_processing_keyboards import make_stickers_manage_keyboard
     index = int(callback.data.replace("st_pick_", ""))
     data = await state.get_data()
     items = data.get("sticker_items") or []
@@ -1743,7 +1793,11 @@ async def sticker_pick(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
     await state.update_data({"active_sticker_index": index})
-    await _show_mockup_after_stickers(callback, state, reply_markup=make_stickers_manage_keyboard(index, len(items)).as_markup())
+    await _show_mockup_after_stickers(
+        callback,
+        state,
+        reply_markup=_make_stickers_manage_keyboard(data, index, len(items)).as_markup(),
+    )
     await callback.answer("Стикер выбран", show_alert=False)
 
 
@@ -1918,7 +1972,6 @@ async def sticker_rotate(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "st_delete")
 async def sticker_delete(callback: CallbackQuery, state: FSMContext):
-    from keyboards.print_processing_keyboards import make_stickers_manage_keyboard
     await _ensure_edit_snapshot(state)
     data = await state.get_data()
     items = deepcopy(data.get("sticker_items") or [])
@@ -1936,10 +1989,22 @@ async def sticker_delete(callback: CallbackQuery, state: FSMContext):
     new_active = None if not items else min(active, len(items) - 1)
     await state.update_data({"sticker_items": items, "stickers": codes, "active_sticker_index": new_active})
     if not items:
-        await _show_mockup_after_stickers(callback, state, reply_markup=make_settings_keyboard().as_markup())
+        # Пусто: возвращаемся в настройки принта/дизайна либо в меню sticker-flow
+        if data.get("stickers_flow_active"):
+            await _show_mockup_after_stickers(
+                callback,
+                state,
+                reply_markup=_make_sticker_flow_main_keyboard().as_markup(),
+            )
+        else:
+            await _show_mockup_after_stickers(callback, state, reply_markup=make_settings_keyboard().as_markup())
         await callback.answer("Стикер удалён", show_alert=False)
         return
-    await _show_mockup_after_stickers(callback, state, reply_markup=make_stickers_manage_keyboard(new_active, len(items)).as_markup())
+    await _show_mockup_after_stickers(
+        callback,
+        state,
+        reply_markup=_make_stickers_manage_keyboard(data, new_active, len(items)).as_markup(),
+    )
     await callback.answer("Стикер удалён", show_alert=False)
 
 
@@ -1951,10 +2016,13 @@ async def stickers_done(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Выбери хотя бы один стикер", show_alert=True)
         return
     # После выбора стикеров возвращаемся к макету в этом же сообщении
-    from keyboards.print_processing_keyboards import make_stickers_manage_keyboard
     items = data.get("sticker_items") or []
     active = data.get("active_sticker_index")
-    await _show_mockup_after_stickers(callback, state, reply_markup=make_stickers_manage_keyboard(active, len(items)).as_markup())
+    await _show_mockup_after_stickers(
+        callback,
+        state,
+        reply_markup=_make_stickers_manage_keyboard(data, active, len(items)).as_markup(),
+    )
     await callback.answer("Стикеры добавлены. Проверь макет и продолжай настройки ✅", show_alert=False)
     # Состояние можно не менять жёстко — пользователь продолжает работу через настройки / confirm
 
@@ -1963,17 +2031,40 @@ async def stickers_done(callback: CallbackQuery, state: FSMContext):
 async def stickers_back(callback: CallbackQuery, state: FSMContext):
     """
     Возвращаемся назад из выбора стикеров.
-    Если мы в категориях — возвращаемся к макету.
+    Если мы в категориях:
+      - для пути только стикеры — возвращаемся к выбору кастомизации;
+      - для пути с фото/дизайном — возвращаемся к редактированию макета с настройками.
     Если мы в просмотре стикеров — возвращаемся к категориям.
     """
     current_state = await state.get_state()
-    # Если мы на этапе выбора категорий — возвращаемся к макету
+    # Если мы на этапе выбора категорий — возвращаемся к выбору кастомизации
     if current_state == Order.sticker_category.state:
-        await _show_mockup_after_stickers(callback, state)
-        await callback.answer()
-        return
+        data = await state.get_data()
+        customization = data.get("customization")
+        zone = data.get("order_zone", "chest")
+        zone_title = zone_label(zone)
+        if customization == "stickers":
+            # Вернуться к выбору кастомизации
+            text = f"Выбери вариант кастомизации для зоны «{zone_title}»:"
+            keyboard = make_customization_keyboard(show_ready_design=designs_available()).as_markup()
+            try:
+                await callback.message.delete()
+            except TelegramBadRequest:
+                pass
+            await callback.message.answer(text, reply_markup=keyboard)
+            await state.update_data({"edit_history": None, "stickers_flow_active": False})
+            await state.set_state(Order.customization)
+            await callback.answer()
+            return
+        else:
+            # Фото/дизайн путь — вернуть макет с настройками
+            await state.update_data({"stickers_flow_active": False})
+            await _show_mockup_after_stickers(callback, state, reply_markup=make_settings_keyboard().as_markup())
+            await callback.answer()
+            return
     # Если мы на этапе выбора стикера — возвращаемся к категориям
     await _start_sticker_flow(callback, state)
+    await state.set_state(Order.sticker_category)
 
 
 @router.callback_query(F.data == "stickers_cancel")
@@ -3166,12 +3257,16 @@ async def edit_stickers(callback: CallbackQuery, state: FSMContext):
     Переход в режим выбора/редактирования стикеров из настроек принта.
     """
     await _ensure_edit_snapshot(state)
+    await state.update_data({"stickers_flow_active": False})
     data = await state.get_data()
     items = data.get("sticker_items") or []
     if items:
-        from keyboards.print_processing_keyboards import make_stickers_manage_keyboard
         active = data.get("active_sticker_index")
-        await _show_mockup_after_stickers(callback, state, reply_markup=make_stickers_manage_keyboard(active, len(items)).as_markup())
+        await _show_mockup_after_stickers(
+            callback,
+            state,
+            reply_markup=_make_stickers_manage_keyboard(data, active, len(items)).as_markup(),
+        )
     else:
         await _start_sticker_flow(callback, state)
 

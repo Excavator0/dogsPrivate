@@ -5,7 +5,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 def confirm_or_setting_keyboard():
     builder = InlineKeyboardBuilder()
     builder.add(InlineKeyboardButton(text="Продолжить", callback_data="confirm"))
-    builder.add(InlineKeyboardButton(text="⚙️ Настройки", callback_data="settings"))
+    builder.add(InlineKeyboardButton(text="⚙️Настройки", callback_data="settings"))
     builder.add(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_customization"))
     builder.adjust(1)
     return builder
